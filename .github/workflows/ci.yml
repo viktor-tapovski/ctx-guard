@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Check shell syntax
+        run: bash -n install.sh bin/ctx-guard-run
+      - name: Check Python syntax
+        run: python3 -m py_compile hooks/*.py hooks/lib/*.py bin/ctx-guard-uninstall
+      - name: Run smoke tests
+        run: bash tests/smoke.sh

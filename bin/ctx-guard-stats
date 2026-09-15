@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+ctx-guard-stats: summarizes the stats.jsonl event log so you can verify
+ctx-guard is actually saving tokens, instead of taking it on faith.
+
+Two kinds of numbers are reported, and they are NOT conflated:
+
+  MEASURED  -- real before/after byte counts from ctx-guard-run (the command
+              wrapper). We run the real command exactly once and know the
+              full log size vs. what was actually returned, so this is a
+              hard number, not an estimate.
+
+  OBSERVED  -- rewrite counts from pre_bash_rewrite.py (e.g. "git status"
+              rewritten to "--porcelain") and tool-output sizes from
+              context_monitor.py. We do NOT fabricate a "tokens saved" figure
+              for these: since the unbounded/original command is never run,
+              there is no ground truth to diff against. Only counts and
+              observed sizes are shown.
+
+Token estimates use the same bytes/4 heuristic ctx-guard uses elsewhere.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from collections import Counter, defaultdict
+
+STATE_DIR = os.environ.get(
+    "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"
+)
+DEFAULT_STATS_FILE = os.environ.get(
+    "CTX_GUARD_STATS_FILE", os.path.join(STATE_DIR, "stats.jsonl")
+)
+
+
+def load_events(path: str, since_ts: float | None) -> list[dict]:
+    events = []
+    if not os.path.isfile(path):
+        return events
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if since_ts is not None and ev.get("ts", 0) < since_ts:
+                continue
+            events.append(ev)
+    return events
+
+
+def fmt_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
+def fmt_tokens(n: float) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return f"{n:.0f}"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Summarize ctx-guard stats.jsonl")
+    parser.add_argument("--stats-file", default=DEFAULT_STATS_FILE)
+    parser.add_argument("--since", default=None,
+                         help="e.g. 1d, 7d, 24h -- only include events at/after this age")
+    parser.add_argument("--json", action="store_true", help="print machine-readable JSON summary")
+    parser.add_argument("--reset", action="store_true", help="delete the stats file and exit")
+    args = parser.parse_args()
+
+    if args.reset:
+        if os.path.isfile(args.stats_file):
+            os.remove(args.stats_file)
+            print(f"Deleted {args.stats_file}")
+        else:
+            print("No stats file to delete.")
+        return
+
+    since_ts = None
+    if args.since:
+        unit = args.since[-1]
+        try:
+            amount = float(args.since[:-1])
+        except ValueError:
+            print(f"Invalid --since value: {args.since}", file=sys.stderr)
+            sys.exit(1)
+        seconds = {"h": 3600, "d": 86400, "w": 604800}.get(unit)
+        if seconds is None:
+            print(f"Invalid --since unit (use h/d/w): {args.since}", file=sys.stderr)
+            sys.exit(1)
+        since_ts = time.time() - amount * seconds
+
+    events = load_events(args.stats_file, since_ts)
+
+    if not events:
+        if args.json:
+            print(json.dumps({"events": 0}))
+        else:
+            print(f"No ctx-guard stats recorded yet in {args.stats_file}.")
+            print("Stats accumulate as ctx-guard rewrites commands or wraps verbose output.")
+        return
+
+    by_agent = defaultdict(list)
+    for ev in events:
+        by_agent[ev.get("agent", "unknown")].append(ev)
+
+    # --- MEASURED: ctx-guard-run before/after ---
+    run_events = [e for e in events if e.get("kind") == "ctx_guard_run"]
+    compressed = [e for e in run_events if e.get("compressed")]
+    total_orig = sum(e.get("original_bytes", 0) for e in run_events)
+    total_returned = sum(e.get("returned_bytes", 0) for e in run_events)
+    saved_bytes = max(0, total_orig - total_returned)
+    saved_tokens = saved_bytes / 4
+
+    # --- OBSERVED: rewrites ---
+    rewrite_events = [e for e in events if e.get("kind") == "rewrite"]
+    rewrite_by_rule = Counter(e.get("rule", "unknown") for e in rewrite_events)
+
+    # --- OBSERVED: raw tool output volume delivered to the model ---
+    tool_events = [e for e in events if e.get("kind") == "tool_output"]
+    tool_bytes_by_tool = defaultdict(int)
+    for e in tool_events:
+        tool_bytes_by_tool[e.get("tool_name", "unknown")] += e.get("result_bytes", 0)
+    total_tool_bytes = sum(tool_bytes_by_tool.values())
+
+    summary = {
+        "events": len(events),
+        "agents": {a: len(evs) for a, evs in by_agent.items()},
+        "measured": {
+            "commands_wrapped": len(run_events),
+            "commands_compressed": len(compressed),
+            "original_bytes": total_orig,
+            "returned_bytes": total_returned,
+            "saved_bytes": saved_bytes,
+            "saved_tokens_est": round(saved_tokens),
+            "compression_ratio_pct": round(100 * saved_bytes / total_orig, 1) if total_orig else 0.0,
+        },
+        "observed": {
+            "rewrites_by_rule": dict(rewrite_by_rule),
+            "total_rewrites": len(rewrite_events),
+            "tool_output_bytes_by_tool": dict(tool_bytes_by_tool),
+            "total_tool_output_bytes": total_tool_bytes,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return
+
+    print(f"ctx-guard stats  ({len(events)} events, file: {args.stats_file})")
+    print("By agent: " + ", ".join(f"{a}={len(evs)}" for a, evs in by_agent.items()))
+    print()
+    print("== MEASURED (real before/after bytes from ctx-guard-run) ==")
+    print(f"  commands wrapped:      {len(run_events)}  ({len(compressed)} actually compressed)")
+    print(f"  original output:       {fmt_bytes(total_orig)}")
+    print(f"  returned to model:     {fmt_bytes(total_returned)}")
+    print(f"  saved:                 {fmt_bytes(saved_bytes)}  "
+          f"({summary['measured']['compression_ratio_pct']}% reduction)")
+    print(f"  estimated tokens saved: ~{fmt_tokens(saved_tokens)}  (bytes/4 heuristic)")
+    print()
+    print("== OBSERVED (no ground-truth baseline, counts/sizes only -- not 'tokens saved') ==")
+    print(f"  command rewrites applied: {len(rewrite_events)}")
+    for rule, count in rewrite_by_rule.most_common(10):
+        print(f"    {rule:20s} {count}")
+    print(f"  total tool output delivered: {fmt_bytes(total_tool_bytes)} "
+          f"(~{fmt_tokens(total_tool_bytes / 4)} tokens)")
+    for tool, nbytes in sorted(tool_bytes_by_tool.items(), key=lambda kv: -kv[1])[:10]:
+        print(f"    {tool:20s} {fmt_bytes(nbytes)}")
+
+
+if __name__ == "__main__":
+    main()

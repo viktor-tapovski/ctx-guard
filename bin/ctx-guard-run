@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# ctx-guard-run: executes a command script, caps output that reaches the
+# agent, and archives the full output to disk so nothing is lost. Also logs
+# a real, measured before/after byte count to the shared stats file so
+# `ctx-guard-stats` can report actual (not estimated) token savings.
+#
+# Usage: ctx-guard-run <script-file>
+# Env:   CTX_GUARD_MAX_LINES          (default 150)  max lines returned to context
+#        CTX_GUARD_LOG_DIR            (default /tmp/ctx-guard-<uid>/logs)
+#        CTX_GUARD_LOG_RETENTION_DAYS (default 7)     delete archived logs older than this
+#        CTX_GUARD_STATE_DIR          (default /tmp/ctx-guard-<uid>/state) stats.jsonl lives here
+#        CTX_GUARD_AGENT              (default "unknown") tag written into stats events
+
+set -uo pipefail
+
+MAX_LINES="${CTX_GUARD_MAX_LINES:-150}"
+LOG_DIR="${CTX_GUARD_LOG_DIR:-/tmp/ctx-guard-$(id -u)/logs}"
+RETENTION_DAYS="${CTX_GUARD_LOG_RETENTION_DAYS:-7}"
+REDACT_LOGS="${CTX_GUARD_REDACT_LOGS:-1}"
+STATE_DIR="${CTX_GUARD_STATE_DIR:-/tmp/ctx-guard-$(id -u)/state}"
+STATS_FILE="${CTX_GUARD_STATS_FILE:-$STATE_DIR/stats.jsonl}"
+AGENT="${CTX_GUARD_AGENT:-unknown}"
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+chmod 700 "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+
+# Self-prune: archived logs are never rotated elsewhere, so do it here on every run.
+find "$LOG_DIR" -maxdepth 1 -name 'run-*' -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
+
+SCRIPT="$1"
+# BSD/macOS mktemp only randomizes trailing Xs -- anything after them (like a
+# ".log" suffix) is taken literally, silently reusing the same filename every
+# call. Keep the Xs at the very end and match "run-*" for retention instead.
+RAW_LOG="$(mktemp "$LOG_DIR/raw-XXXXXXXX")"
+
+bash "$SCRIPT" >"$RAW_LOG" 2>&1
+STATUS=$?
+
+TOTAL=$(wc -l < "$RAW_LOG")
+ORIG_BYTES=$(wc -c < "$RAW_LOG" | tr -d ' ')
+
+redact_file() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+assignment = re.compile(
+    r"""(?ix)
+    (\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|
+    password|passwd|secret|private[_-]?key)\b["']?\s*[:=]\s*["']?)
+    ([^\s,"']+)
+    """
+)
+bearer = re.compile(r"(?i)(\bauthorization\s*:\s*bearer\s+)[^\s]+")
+known_token = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b"
+)
+private_key = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----")
+private_key_end = re.compile(r"-----END [^-]*PRIVATE KEY-----")
+
+in_private_key = False
+with open(path, encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        if in_private_key:
+            if private_key_end.search(line):
+                in_private_key = False
+            print("[REDACTED PRIVATE KEY]")
+            continue
+        if private_key.search(line):
+            in_private_key = not bool(private_key_end.search(line))
+            print("[REDACTED PRIVATE KEY]")
+            continue
+        line = bearer.sub(r"\1[REDACTED]", line)
+        line = assignment.sub(r"\1[REDACTED]", line)
+        line = known_token.sub("[REDACTED TOKEN]", line)
+        sys.stdout.write(line)
+PY
+}
+
+# Raw command output never reaches the model by default. Redaction is
+# fail-closed: if the sanitizer cannot run, only a withholding notice is
+# retained. Set CTX_GUARD_REDACT_LOGS=0 only when local raw logs are
+# explicitly acceptable.
+LOG="$(mktemp "$LOG_DIR/run-XXXXXXXX")"
+if [ "$REDACT_LOGS" = "0" ]; then
+  mv "$RAW_LOG" "$LOG"
+elif ! redact_file "$RAW_LOG" > "$LOG"; then
+  rm -f "$RAW_LOG"
+  printf '%s\n' "ctx-guard: output withheld because redaction failed" > "$LOG"
+else
+  rm -f "$RAW_LOG"
+fi
+chmod 600 "$LOG"
+
+# log_stats <returned_bytes> <compressed:0|1> -- never lets a stats-logging
+# failure affect ctx-guard-run's own exit code.
+log_stats() {
+  local returned_bytes="$1" compressed="$2"
+  python3 - "$STATS_FILE" "$AGENT" "$ORIG_BYTES" "$returned_bytes" "$compressed" "$STATUS" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+stats_file, agent, orig, returned, compressed, status = sys.argv[1:7]
+os.makedirs(os.path.dirname(stats_file), mode=0o700, exist_ok=True)
+os.chmod(os.path.dirname(stats_file), 0o700)
+event = {
+    "ts": time.time(),
+    "kind": "ctx_guard_run",
+    "agent": agent,
+    "original_bytes": int(orig),
+    "returned_bytes": int(returned),
+    "compressed": bool(int(compressed)),
+    "exit_status": int(status),
+}
+fd = os.open(stats_file, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+os.write(fd, (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8"))
+os.close(fd)
+PY
+}
+
+if [ "$TOTAL" -le "$MAX_LINES" ]; then
+  cat "$LOG"
+  log_stats "$ORIG_BYTES" 0
+  rm -f "$SCRIPT"
+  exit $STATUS
+fi
+
+# --- Compressed view: errors first, then head + tail ---
+OUT="$(mktemp "$LOG_DIR/out-XXXXXXXX")"
+{
+  echo "=== ctx-guard: output compressed ($TOTAL lines -> summary, exit=$STATUS) ==="
+
+  ERR_LINES=$(grep -inE '\b(error|fail|failed|failure|fatal|exception|panic|traceback|warning|assert)\b' "$LOG" | head -40)
+  if [ -n "$ERR_LINES" ]; then
+    echo "--- errors/warnings (line-numbered) ---"
+    echo "$ERR_LINES"
+  fi
+
+  HEAD_N=$(( MAX_LINES / 4 ))
+  TAIL_N=$(( MAX_LINES / 4 ))
+  echo "--- first $HEAD_N lines ---"
+  head -n "$HEAD_N" "$LOG"
+  echo "--- ... $(( TOTAL - HEAD_N - TAIL_N )) lines omitted ... ---"
+  echo "--- last $TAIL_N lines ---"
+  tail -n "$TAIL_N" "$LOG"
+  echo "=== full output saved: $LOG (grep/sed it for specifics instead of re-running) ==="
+} > "$OUT"
+
+cat "$OUT"
+RETURNED_BYTES=$(wc -c < "$OUT" | tr -d ' ')
+log_stats "$RETURNED_BYTES" 1
+rm -f "$OUT" "$SCRIPT"
+exit $STATUS

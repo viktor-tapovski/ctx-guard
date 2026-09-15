@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Safely remove ctx-guard files recorded by the installation manifest."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+from pathlib import Path
+
+HOME = Path(os.path.expanduser("~"))
+DEST = HOME / ".ctx-guard"
+MANIFEST_PATH = DEST / "install-manifest.json"
+RUN_DIR = Path("/tmp") / f"ctx-guard-{os.getuid()}"
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_manifest() -> dict | None:
+    if not MANIFEST_PATH.is_file():
+        print(f"No installation manifest found at {MANIFEST_PATH}; refusing to edit user configuration.")
+        print("Reinstall ctx-guard first, then run uninstall again.")
+        return None
+    with MANIFEST_PATH.open(encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+        raise SystemExit(f"Unsupported ctx-guard manifest: {MANIFEST_PATH}")
+    return manifest
+
+
+def remove_claude_hooks(manifest: dict) -> None:
+    settings_path = Path(manifest["claude_settings"])
+    commands = set(manifest.get("claude_hook_commands", []))
+    if not settings_path.is_file():
+        print("No Claude Code settings.json found, skipping.")
+        return
+
+    with settings_path.open(encoding="utf-8") as stream:
+        settings = json.load(stream)
+
+    hooks = settings.get("hooks", {})
+    changed = False
+    for event in list(hooks):
+        kept_entries = []
+        for entry in hooks[event]:
+            original = entry.get("hooks", [])
+            remaining = [hook for hook in original if hook.get("command") not in commands]
+            if len(remaining) != len(original):
+                changed = True
+                if remaining:
+                    kept_entries.append({**entry, "hooks": remaining})
+            else:
+                kept_entries.append(entry)
+        if kept_entries:
+            hooks[event] = kept_entries
+        else:
+            del hooks[event]
+            changed = True
+
+    if not hooks:
+        settings.pop("hooks", None)
+    if changed:
+        temporary = settings_path.with_suffix(settings_path.suffix + ".ctx-guard.tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(settings, stream, indent=2)
+        os.replace(temporary, settings_path)
+        print(f"Removed manifest-owned Claude Code hooks from {settings_path}")
+    else:
+        print(f"No manifest-owned Claude Code hooks found in {settings_path}")
+
+
+def remove_copilot_hooks(manifest: dict) -> None:
+    path = Path(manifest["copilot_hooks_file"])
+    if not path.is_file():
+        print("No manifest-owned Copilot CLI hooks file found, skipping.")
+        return
+    expected_hash = manifest.get("copilot_hooks_sha256")
+    if expected_hash and sha256(path) != expected_hash:
+        print(f"Preserving modified Copilot CLI hooks file: {path}")
+        return
+    path.unlink()
+    print(f"Removed {path}")
+
+
+def restore_agents(manifest: dict) -> None:
+    for entry in manifest.get("agents", {}).values():
+        path = Path(entry["path"])
+        if not path.exists():
+            continue
+        installed_hash = entry.get("installed_sha256")
+        if installed_hash and sha256(path) != installed_hash:
+            print(f"Preserving modified agent file: {path}")
+            continue
+        backup = entry.get("backup")
+        if backup and Path(backup).is_file():
+            shutil.copy2(backup, path)
+            print(f"Restored pre-existing agent file: {path}")
+        else:
+            path.unlink()
+            print(f"Removed ctx-guard agent file: {path}")
+
+
+def remove_links(manifest: dict) -> None:
+    for link_name, expected_target in manifest.get("local_bin_links", {}).items():
+        link = Path(link_name)
+        if link.is_symlink() and os.path.realpath(link) == os.path.realpath(expected_target):
+            link.unlink()
+            print(f"Removed symlink {link}")
+
+
+def remove_rules(manifest: dict) -> None:
+    claude_md = Path(manifest["claude_md"])
+    rules_file = Path(manifest["claude_rules_file"])
+    expected_hash = manifest.get("claude_rules_sha256")
+    if not claude_md.is_file() or not rules_file.is_file():
+        return
+    if expected_hash and sha256(rules_file) != expected_hash:
+        print(f"Preserving modified ctx-guard rules file: {rules_file}")
+        return
+
+    block = rules_file.read_text(encoding="utf-8")
+    content = claude_md.read_text(encoding="utf-8")
+    if block not in content:
+        return
+    updated = content.replace("\n" + block, "", 1).replace(block, "", 1)
+    claude_md.write_text(updated, encoding="utf-8")
+    print(f"Removed manifest-owned rules from {claude_md}")
+
+
+def main() -> None:
+    print("Uninstalling ctx-guard ...")
+    manifest = load_manifest()
+    if manifest is None:
+        return
+
+    remove_claude_hooks(manifest)
+    remove_copilot_hooks(manifest)
+    restore_agents(manifest)
+    remove_links(manifest)
+    remove_rules(manifest)
+
+    if DEST.is_dir():
+        shutil.rmtree(DEST)
+        print(f"Removed {DEST}")
+    if RUN_DIR.is_dir() or RUN_DIR.is_symlink():
+        if RUN_DIR.is_symlink():
+            RUN_DIR.unlink()
+        else:
+            shutil.rmtree(RUN_DIR)
+        print(f"Removed runtime dir {RUN_DIR}")
+
+    print("Done. Restart Claude Code and Copilot CLI to pick up the changes.")
+
+
+if __name__ == "__main__":
+    main()
