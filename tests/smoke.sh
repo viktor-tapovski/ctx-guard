@@ -24,7 +24,9 @@ PASS=0
 FAIL=0
 ok()  { PASS=$((PASS + 1)); echo "  ok   - $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "  FAIL - $1"; }
-mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+mode_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
 
 # --- pre_bash_rewrite.py (Claude Code payload shape) -----------------------
 
