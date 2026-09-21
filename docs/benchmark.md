@@ -12,8 +12,9 @@ single headline savings percentage.
 - the resulting byte reduction;
 - the command exit status.
 
-`ctx-guard-stats` reports these values under **MEASURED** and estimates tokens
-using the project's bytes-per-four heuristic.
+`ctx-guard-stats --verbose` reports these values under **MEASURED** and
+estimates tokens using the project's bytes-per-four heuristic. (Plain
+`ctx-guard-stats` prints the same headline numbers as a one-line gauge.)
 
 ## What is observed
 

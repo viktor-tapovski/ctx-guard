@@ -94,7 +94,8 @@ Check whether ctx-guard is actually saving tokens — don't take it on faith:
 `install.sh` symlinks it onto your `PATH` via `~/.local/bin`, so just run:
 
 ```bash
-ctx-guard-stats            # human-readable summary
+ctx-guard-stats            # one-line savings gauge
+ctx-guard-stats --verbose  # full MEASURED/OBSERVED report
 ctx-guard-stats --json     # machine-readable
 ctx-guard-stats --since 7d # last 7 days only
 ctx-guard-stats --reset    # clear the log
@@ -102,7 +103,20 @@ ctx-guard-stats --reset    # clear the log
 
 (If `~/.local/bin` isn't on your `PATH`, use the full path `~/.ctx-guard/bin/ctx-guard-stats` instead, or add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc file.)
 
-Output is split into two honestly-labeled sections:
+The default is a single line — the headline savings and nothing else:
+
+```
+ctx-guard  |███████████████████▉    | 83.0%  ·  319.5KB saved  ·  ~81.8K tokens
+```
+
+Bars are decoration only: piped or redirected output drops the bar and stays
+plain ASCII, and `CTX_GUARD_BARS=always|never` overrides the TTY auto-detection
+either way. On a terminal that cannot encode the block glyphs (`LC_ALL=C` and
+similar) the bars fall back to `#`/`-` rather than failing.
+
+`--verbose` prints the full report, where the compression ratio and the
+per-rule / per-tool breakdowns each get their own bar. It is split into two
+honestly-labeled sections:
 
 - **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
 - **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`) and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof.
@@ -136,6 +150,7 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | `CTX_GUARD_STATS_FILE` | `$CTX_GUARD_STATE_DIR/stats.jsonl` | Override the stats log location |
 | `CTX_GUARD_LOG_RETENTION_DAYS` | 7 | Archived logs older than this are deleted on every run |
 | `CTX_GUARD_REDACT_LOGS` | 1 | Redact common credential patterns before logs reach the model or remain on disk; set to `0` only for an explicitly trusted local workflow |
+| `CTX_GUARD_BARS` | auto | `ctx-guard-stats` bars: `auto` draws them only when stdout is a TTY, `always`/`never` force them on/off |
 | `CTX_GUARD_AGENT` | `unknown` | Tag written into stats events; set to `claude-code`/`copilot-cli` by the installed hook wiring |
 
 Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; edit `PATTERNS` in `auto_delegate.py` for your routing keywords.

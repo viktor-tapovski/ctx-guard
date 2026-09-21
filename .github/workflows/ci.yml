@@ -18,6 +18,6 @@ jobs:
       - name: Check shell syntax
         run: bash -n install.sh bin/ctx-guard-run
       - name: Check Python syntax
-        run: python3 -m py_compile hooks/*.py hooks/lib/*.py bin/ctx-guard-uninstall
+        run: python3 -m py_compile hooks/*.py hooks/lib/*.py bin/ctx-guard-stats bin/ctx-guard-uninstall
       - name: Run smoke tests
         run: bash tests/smoke.sh

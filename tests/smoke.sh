@@ -233,8 +233,37 @@ echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["mea
 saved=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["measured"]["saved_bytes"])')
 [ "$saved" -gt 0 ] && ok "ctx-guard-stats reports saved_bytes > 0 ($saved)" || bad "saved_bytes not > 0 -> $saved"
 
-text_out=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE")
-echo "$text_out" | grep -q "MEASURED" && ok "human-readable stats output present" || bad "human-readable output missing MEASURED section"
+text_out=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE" --verbose)
+echo "$text_out" | grep -q "MEASURED" && ok "--verbose stats output present" || bad "--verbose output missing MEASURED section"
+echo "$text_out" | grep -q "OBSERVED" && ok "--verbose output has OBSERVED section" || bad "--verbose output missing OBSERVED section"
+
+# Default view is the one-line gauge, not the full report.
+gauge_out=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE")
+gauge_lines=$(printf '%s\n' "$gauge_out" | wc -l | tr -d ' ')
+[ "$gauge_lines" = "1" ] && ok "default stats output is a single line" || bad "default output was $gauge_lines lines -> $gauge_out"
+echo "$gauge_out" | grep -q "saved" && ok "gauge reports saved bytes" || bad "gauge missing savings -> $gauge_out"
+echo "$gauge_out" | grep -q "MEASURED" && bad "default output should not print the full report" || ok "default output omits the full report"
+
+# Bars are decoration only: captured output is not a TTY, so it must stay plain.
+echo "$gauge_out" | grep -q "█" && bad "bars leaked into non-TTY output" || ok "no bars in piped stats output"
+printf '%s' "$gauge_out" | grep -q "$(printf '\033')" && bad "ANSI escapes leaked into piped output" || ok "no ANSI escapes in piped output"
+
+bar_out=$(CTX_GUARD_BARS=always python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE")
+echo "$bar_out" | grep -q "█" && ok "CTX_GUARD_BARS=always renders the gauge bar" || bad "CTX_GUARD_BARS=always produced no bars -> $bar_out"
+bar_lines=$(printf '%s\n' "$bar_out" | wc -l | tr -d ' ')
+[ "$bar_lines" = "1" ] && ok "gauge with bars is still a single line" || bad "gauge with bars was $bar_lines lines -> $bar_out"
+
+verbose_bars=$(CTX_GUARD_BARS=always python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE" --verbose)
+echo "$verbose_bars" | grep -q "█" && ok "--verbose renders bars too" || bad "--verbose produced no bars"
+echo "$verbose_bars" | grep -q "MEASURED" && ok "--verbose with bars keeps MEASURED section" || bad "--verbose with bars missing MEASURED section"
+
+never_out=$(CTX_GUARD_BARS=never python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE")
+echo "$never_out" | grep -q "█" && bad "CTX_GUARD_BARS=never still drew bars" || ok "CTX_GUARD_BARS=never suppresses bars"
+
+# An ASCII-only stdout must degrade to '#'/'-', never raise UnicodeEncodeError.
+ascii_out=$(CTX_GUARD_BARS=always LC_ALL=C PYTHONIOENCODING=ascii python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE" 2>&1)
+echo "$ascii_out" | grep -q "UnicodeEncodeError" && bad "ASCII stdout crashed -> $ascii_out" || ok "ASCII stdout does not crash"
+echo "$ascii_out" | grep -q "#" && ok "ASCII stdout falls back to '#' bars" || bad "no ASCII bar fallback -> $ascii_out"
 
 # --- context_monitor.py: Claude Code context-window thresholds ------------
 

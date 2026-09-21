@@ -6,6 +6,14 @@
 - Added public repository, security, contribution, and compatibility guidance.
 - Added CI coverage for shell syntax, Python syntax, smoke tests, and
   install/uninstall behavior.
+- `ctx-guard-stats` now prints a one-line savings gauge by default. The full
+  MEASURED/OBSERVED report moved behind `--verbose`; `--json` is unchanged.
+- Added bars to `ctx-guard-stats` — the headline gauge, and in `--verbose` the
+  compression ratio and the per-rule / per-tool breakdowns. Drawn with block
+  glyphs to the nearest eighth of a cell, falling back to `#`/`-` where stdout
+  cannot encode them. No third-party dependency.
+- Added `CTX_GUARD_BARS=always|never|auto` to override the TTY auto-detection
+  for those bars. Piped and redirected output stays plain ASCII.
 
 ## 0.1.0
 

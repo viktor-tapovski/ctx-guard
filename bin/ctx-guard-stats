@@ -71,12 +71,81 @@ def fmt_tokens(n: float) -> str:
     return f"{n:.0f}"
 
 
+BAR_WIDTH = 24
+LABEL_WIDTH = 20
+EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8 of a cell; a full cell is █
+
+
+def unicode_ok() -> bool:
+    """Whether stdout can carry the block glyphs. Under LC_ALL=C and on some
+    minimal images it cannot, and an unguarded print would traceback."""
+    try:
+        "█░·".encode(sys.stdout.encoding or "ascii")
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
+def bars_enabled() -> bool:
+    """Bars are decoration: on for a terminal, off for pipes, files and tests."""
+    mode = os.environ.get("CTX_GUARD_BARS", "auto")
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return sys.stdout.isatty()
+
+
+def render_bar(value: float, total: float, width: int = BAR_WIDTH) -> str:
+    """Return a '|bar|' string filled to value/total, to the nearest eighth of
+    a cell -- at width 24 whole cells would quantize the gauge to 4% steps."""
+    frac = 0.0 if total <= 0 else max(0.0, min(1.0, value / total))
+    if not unicode_ok():
+        filled = round(width * frac)
+        return f"|{'#' * filled}{'-' * (width - filled)}|"
+
+    full, rem = divmod(round(width * 8 * frac), 8)
+    bar = "█" * full + (EIGHTHS[rem - 1] if rem else "")
+    return f"|{bar}{'░' * (width - len(bar))}|"
+
+
+def print_bar(label: str, value: float, total: float, display: str,
+              indent: str = "    ") -> None:
+    """Print '<label> <bar> <display>', dropping the bar when bars are off."""
+    desc = f"{indent}{label:{LABEL_WIDTH}s}"
+    if total <= 0 or not bars_enabled():
+        print(f"{desc} {display}")
+        return
+    print(f"{desc} {render_bar(value, total)} {display}")
+
+
+def print_gauge(summary: dict) -> None:
+    """The default view: one line, the headline savings and nothing else."""
+    measured = summary["measured"]
+    if not measured["commands_wrapped"]:
+        n = summary["events"]
+        print(f"ctx-guard  no wrapped commands recorded yet "
+              f"({n} event{'' if n == 1 else 's'})  --  try --verbose")
+        return
+
+    pct = measured["compression_ratio_pct"]
+    bars = bars_enabled()
+    sep = "  ·  " if bars and unicode_ok() else "  -  "
+    bar = f"{render_bar(pct, 100)} " if bars else ""
+    head = f"{pct}%" if bars else f"{pct}% reduction"
+    print(f"ctx-guard  {bar}{head}"
+          f"{sep}{fmt_bytes(measured['saved_bytes'])} saved"
+          f"{sep}~{fmt_tokens(measured['saved_tokens_est'])} tokens")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize ctx-guard stats.jsonl")
     parser.add_argument("--stats-file", default=DEFAULT_STATS_FILE)
     parser.add_argument("--since", default=None,
                          help="e.g. 1d, 7d, 24h -- only include events at/after this age")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON summary")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="print the full MEASURED/OBSERVED report instead of the one-line gauge")
     parser.add_argument("--reset", action="store_true", help="delete the stats file and exit")
     args = parser.parse_args()
 
@@ -159,6 +228,10 @@ def main() -> None:
         print(json.dumps(summary, indent=2))
         return
 
+    if not args.verbose:
+        print_gauge(summary)
+        return
+
     print(f"ctx-guard stats  ({len(events)} events, file: {args.stats_file})")
     print("By agent: " + ", ".join(f"{a}={len(evs)}" for a, evs in by_agent.items()))
     print()
@@ -169,15 +242,22 @@ def main() -> None:
     print(f"  saved:                 {fmt_bytes(saved_bytes)}  "
           f"({summary['measured']['compression_ratio_pct']}% reduction)")
     print(f"  estimated tokens saved: ~{fmt_tokens(saved_tokens)}  (bytes/4 heuristic)")
+    if bars_enabled():
+        pct = summary["measured"]["compression_ratio_pct"]
+        print_bar("reduction", pct, 100, f"{pct}%", indent="  ")
     print()
     print("== OBSERVED (no ground-truth baseline, counts/sizes only -- not 'tokens saved') ==")
     print(f"  command rewrites applied: {len(rewrite_events)}")
-    for rule, count in rewrite_by_rule.most_common(10):
-        print(f"    {rule:20s} {count}")
+    top_rules = rewrite_by_rule.most_common(10)
+    max_rule = max((c for _, c in top_rules), default=0)
+    for rule, count in top_rules:
+        print_bar(rule, count, max_rule, str(count))
     print(f"  total tool output delivered: {fmt_bytes(total_tool_bytes)} "
           f"(~{fmt_tokens(total_tool_bytes / 4)} tokens)")
-    for tool, nbytes in sorted(tool_bytes_by_tool.items(), key=lambda kv: -kv[1])[:10]:
-        print(f"    {tool:20s} {fmt_bytes(nbytes)}")
+    top_tools = sorted(tool_bytes_by_tool.items(), key=lambda kv: -kv[1])[:10]
+    max_tool = max((b for _, b in top_tools), default=0)
+    for tool, nbytes in top_tools:
+        print_bar(tool, nbytes, max_tool, fmt_bytes(nbytes))
 
 
 if __name__ == "__main__":
