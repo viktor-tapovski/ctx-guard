@@ -135,15 +135,28 @@ def print_bar(label: str, value: float, total: float, display: str,
 def print_gauge(summary: dict) -> None:
     """The default view: one line, the headline savings and nothing else."""
     measured = summary["measured"]
+    observed = summary["observed"]
+    bars = bars_enabled()
+    sep = "  ·  " if bars and unicode_ok() else "  -  "
+
     if not measured["commands_wrapped"]:
-        n = summary["events"]
-        print(f"ctx-guard  no wrapped commands recorded yet "
-              f"({n} event{'' if n == 1 else 's'})  --  try --verbose")
+        # Nothing was wrapped, so no before/after pair exists and there is no
+        # honest ratio to print. Report the observed volume instead of a bare
+        # event count -- same MEASURED/OBSERVED split the full report makes.
+        parts = []
+        rewrites = observed["total_rewrites"]
+        if rewrites:
+            parts.append(f"{rewrites} rewrite{'' if rewrites == 1 else 's'}")
+        if observed["total_tool_output_bytes"]:
+            parts.append(f"{fmt_bytes(observed['total_tool_output_bytes'])} tool output")
+        if not parts:
+            n = summary["events"]
+            parts.append(f"{n} event{'' if n == 1 else 's'}")
+        print(f"ctx-guard  no measured savings yet{sep}{sep.join(parts)} observed"
+              f"  --  try --verbose")
         return
 
     pct = measured["compression_ratio_pct"]
-    bars = bars_enabled()
-    sep = "  ·  " if bars and unicode_ok() else "  -  "
     bar = f"{render_bar(pct, 100)} " if bars else ""
     head = f"{pct}%" if bars else f"{pct}% reduction"
     print(f"ctx-guard  {bar}{head}"
