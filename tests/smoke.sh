@@ -265,6 +265,30 @@ ascii_out=$(CTX_GUARD_BARS=always LC_ALL=C PYTHONIOENCODING=ascii python3 "$DIR/
 echo "$ascii_out" | grep -q "UnicodeEncodeError" && bad "ASCII stdout crashed -> $ascii_out" || ok "ASCII stdout does not crash"
 echo "$ascii_out" | grep -q "#" && ok "ASCII stdout falls back to '#' bars" || bad "no ASCII bar fallback -> $ascii_out"
 
+# release-please bumps version.txt and hooks/lib/version.py independently; if
+# one updater ever stops matching, this is where it shows up.
+file_version=$(tr -d '[:space:]' < "$DIR/version.txt")
+reported=$(python3 "$DIR/bin/ctx-guard-stats" --version)
+[ "$reported" = "ctx-guard $file_version" ] \
+  && ok "ctx-guard-stats --version matches version.txt ($file_version)" \
+  || bad "version mismatch: version.txt=$file_version, --version=$reported"
+
+uninstall_version=$(python3 "$DIR/bin/ctx-guard-uninstall" --version)
+[ "$uninstall_version" = "ctx-guard $file_version" ] \
+  && ok "ctx-guard-uninstall --version matches version.txt" \
+  || bad "uninstall version mismatch -> $uninstall_version"
+
+echo "$file_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+  && ok "version.txt holds a bare semver" \
+  || bad "version.txt is not semver -> $file_version"
+
+python3 -c "
+import json, sys
+m = json.load(open('$DIR/.release-please-manifest.json'))
+sys.exit(0 if m.get('.') == '$file_version' else 1)
+" && ok "release-please manifest agrees with version.txt" \
+  || bad "manifest and version.txt disagree"
+
 # --- context_monitor.py: Claude Code context-window thresholds ------------
 
 echo "== context_monitor.py (Claude Code transcript-based window) =="

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 HOME = Path(os.path.expanduser("~"))
@@ -133,7 +134,23 @@ def remove_rules(manifest: dict) -> None:
     print(f"Removed manifest-owned rules from {claude_md}")
 
 
+def ctx_guard_version() -> str:
+    """See the matching helper in ctx-guard-stats: realpath, because this
+    script is reached through a symlink in ~/.local/bin."""
+    lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib")
+    sys.path.insert(0, lib)
+    try:
+        from version import __version__
+        return __version__
+    except ImportError:
+        return "unknown"
+
+
 def main() -> None:
+    if "--version" in sys.argv[1:]:
+        print(f"ctx-guard {ctx_guard_version()}")
+        return
+
     print("Uninstalling ctx-guard ...")
     manifest = load_manifest()
     if manifest is None:

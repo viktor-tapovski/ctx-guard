@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Least privilege: release-please needs to push the release branch and open
+# the release PR, nothing else. Everything below inherits no other scope.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # The default GITHUB_TOKEN cannot trigger other workflows, so ci.yml does
+      # not run on the release PR. That PR only edits CHANGELOG.md, version.txt
+      # and hooks/lib/version.py, all of which CI already saw on the commits
+      # being released. Swap in a PAT or app token if that ever stops holding.
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

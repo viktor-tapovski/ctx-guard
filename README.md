@@ -99,6 +99,7 @@ ctx-guard-stats --verbose  # full MEASURED/OBSERVED report
 ctx-guard-stats --json     # machine-readable
 ctx-guard-stats --since 7d # last 7 days only
 ctx-guard-stats --reset    # clear the log
+ctx-guard-stats --version  # which ctx-guard is installed
 ```
 
 (If `~/.local/bin` isn't on your `PATH`, use the full path `~/.ctx-guard/bin/ctx-guard-stats` instead, or add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc file.)

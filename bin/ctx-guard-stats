@@ -28,6 +28,19 @@ import sys
 import time
 from collections import Counter, defaultdict
 
+def ctx_guard_version() -> str:
+    """Read the shared version module. realpath, not abspath: install.sh
+    symlinks this script into ~/.local/bin, and the module lives next to the
+    real copy under ~/.ctx-guard/hooks/lib."""
+    lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib")
+    sys.path.insert(0, lib)
+    try:
+        from version import __version__
+        return __version__
+    except ImportError:
+        return "unknown"
+
+
 STATE_DIR = os.environ.get(
     "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"
 )
@@ -140,6 +153,8 @@ def print_gauge(summary: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize ctx-guard stats.jsonl")
+    parser.add_argument("--version", action="version",
+                        version=f"ctx-guard {ctx_guard_version()}")
     parser.add_argument("--stats-file", default=DEFAULT_STATS_FILE)
     parser.add_argument("--since", default=None,
                          help="e.g. 1d, 7d, 24h -- only include events at/after this age")
