@@ -289,6 +289,26 @@ sys.exit(0 if m.get('.') == '$file_version' else 1)
 " && ok "release-please manifest agrees with version.txt" \
   || bad "manifest and version.txt disagree"
 
+# Observed-only log: nothing was wrapped, so there is no ratio -- but the
+# gauge should still report the volume it does know about.
+obs_file="$SCRATCH/observed-only.jsonl"
+printf '%s\n' \
+  '{"ts":1,"agent":"claude-code","kind":"tool_output","tool_name":"Bash","result_bytes":2048}' \
+  '{"ts":2,"agent":"claude-code","kind":"rewrite","rule":"git-status"}' > "$obs_file"
+obs_out=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$obs_file")
+echo "$obs_out" | grep -q "no measured savings yet" \
+  && ok "gauge reports no measured savings without wrapped commands" \
+  || bad "gauge missing empty-state text -> $obs_out"
+echo "$obs_out" | grep -q "2.0KB tool output" \
+  && ok "gauge reports observed tool output volume" \
+  || bad "gauge missing observed volume -> $obs_out"
+echo "$obs_out" | grep -q "1 rewrite  " \
+  && ok "gauge singularizes a lone rewrite" \
+  || bad "gauge rewrite count wrong -> $obs_out"
+echo "$obs_out" | grep -qE "[0-9]%" \
+  && bad "gauge invented a percentage with no measured data -> $obs_out" \
+  || ok "gauge shows no percentage without measured data"
+
 # --- context_monitor.py: Claude Code context-window thresholds ------------
 
 echo "== context_monitor.py (Claude Code transcript-based window) =="
