@@ -75,6 +75,31 @@ Estimates usage from the transcript file (bytes/4) and injects escalating guidan
 
 See [Statistics](#statistics).
 
+**5. Flags risky package installs** (`hooks/pkg_install_check.py`, called from `pre_bash_rewrite.py`)
+
+Detects install/run commands across `npm`/`pnpm`/`yarn`, `pip`/`pip3`, `cargo`,
+`gem`, `apt`/`apt-get`, `brew`, `apk`, and `npx`/`pipx run`/`uvx`. Structural
+checks (no network) flag `curl|bash`-style remote-script piping, unpinned
+versions, confirmation-bypass flags (`--force`, `-y`, `--allow-unauthenticated`),
+and git/URL-based installs. For `npm`, `pip`, `cargo`, and `gem` specifically
+(the ecosystems with an open, anyone-can-publish registry), a registry lookup
+also checks package existence, publish age, and typosquat distance against a
+bundled list of popular package names.
+
+A package that does not exist on its registry is **blocked** outright — this
+is the common shape of an LLM hallucinating a plausible-looking package name.
+Everything else (new packages, near-miss names, unpinned versions, bypass
+flags, git/URL sources) is a **warning** that still lets the command run.
+
+Registry lookups use a 1.5s timeout and fail open: if the registry is
+unreachable, the registry-based checks are skipped for that install and only
+the no-network structural checks apply. Private/internal packages that won't
+resolve against the public registry can be exempted via an allowlist file at
+`~/.ctx-guard/pkg-allowlist` (global) and/or `.ctx-guard/pkg-allowlist`
+(per-repo, glob patterns supported, e.g. `@yourorg/*`).
+
+Set `CTX_GUARD_PKG_CHECK=0` to disable this feature entirely.
+
 ## Install
 
 ```bash
