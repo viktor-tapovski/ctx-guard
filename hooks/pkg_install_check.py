@@ -388,6 +388,3 @@ def check_command(cmd: str, cwd: str = None):
     if warnings:
         return PkgCheckResult(action="warn", reason="; ".join(warnings))
     return None
-
-
-    return RegistryInfo(exists=True, age_days=_extract_age_days(ecosystem, data))
