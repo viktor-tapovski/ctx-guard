@@ -244,3 +244,80 @@ def load_allowlist(cwd: str = None) -> list:
 
 def is_allowlisted(name: str, patterns: list) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+_REGISTRY_URL = {
+    "npm": "https://registry.npmjs.org/{name}",
+    "pip": "https://pypi.org/pypi/{name}/json",
+    "cargo": "https://crates.io/api/v1/crates/{name}",
+    "gem": "https://rubygems.org/api/v1/gems/{name}.json",
+}
+
+
+@dataclasses.dataclass
+class RegistryInfo:
+    exists: bool
+    age_days: float = None
+
+
+def _parse_iso8601(value: str) -> float:
+    value = value.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - dt
+    return delta.total_seconds() / 86400.0
+
+
+def _extract_age_days(ecosystem: str, data: dict):
+    try:
+        if ecosystem == "npm":
+            latest = data["dist-tags"]["latest"]
+            return _parse_iso8601(data["time"][latest])
+        if ecosystem == "pip":
+            latest = data["info"]["version"]
+            releases = data["releases"].get(latest) or []
+            if not releases:
+                return None
+            return _parse_iso8601(releases[0]["upload_time_iso_8601"])
+        if ecosystem == "cargo":
+            return _parse_iso8601(data["crate"]["created_at"])
+        if ecosystem == "gem":
+            ts = data.get("version_created_at")
+            return _parse_iso8601(ts) if ts else None
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+    return None
+
+
+def registry_lookup(ecosystem: str, name: str):
+    """Return RegistryInfo, or None if the lookup itself failed (fail open)."""
+    template = _REGISTRY_URL.get(ecosystem)
+    if template is None:
+        return None
+    url = template.format(name=urllib.parse.quote(name, safe="@/"))
+    req = urllib.request.Request(url, headers={"User-Agent": "ctx-guard-pkg-check"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return RegistryInfo(exists=False)
+        return None  # unexpected status -- fail open, don't guess
+    except urllib.error.URLError:
+        return None  # timeout / DNS / offline -- fail open
+    except Exception:
+        return None  # never let a parsing surprise escape -- fail open
+
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+
+    return RegistryInfo(exists=True, age_days=_extract_age_days(ecosystem, data))
