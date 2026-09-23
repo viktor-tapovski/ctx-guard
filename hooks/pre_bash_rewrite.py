@@ -31,6 +31,7 @@ from ctx_guard_common import (  # noqa: E402
     normalize_tool_call,
     record_stats_event,
 )
+import pkg_install_check
 
 CTX_GUARD_RUN = os.environ.get(
     "CTX_GUARD_RUN", os.path.expanduser("~/.ctx-guard/bin/ctx-guard-run")
@@ -102,28 +103,34 @@ def wrap_generic(cmd: str) -> str:
     return f"{shlex.quote(CTX_GUARD_RUN)} {shlex.quote(path)}"
 
 
-def transform(cmd: str) -> tuple[str, str | None] | None:
-    """Return (rule_name, rewritten command), or None to leave it untouched."""
+def transform(cmd: str) -> tuple[str | None, str | None, str | None] | None:
+    """Return (rule_name, rewritten command, pkg_warning), or None to leave
+    cmd untouched with no pkg_warning either."""
     stripped = cmd.strip()
 
     if SENSITIVE_ENV.match(stripped):
-        return "environment-enumeration", None
+        return "environment-enumeration", None, None
+
+    pkg_result = pkg_install_check.check_command(stripped, cwd=os.getcwd())
+    if pkg_result is not None and pkg_result.action == "block":
+        return "pkg-install-blocked", None, pkg_result.reason
+    pkg_warning = pkg_result.reason if pkg_result is not None else None
 
     if already_filtered(stripped) or CHEAP.match(stripped):
-        return None
+        return (None, None, pkg_warning) if pkg_warning else None
     # Never rewrite compound commands with targeted rules; wrap them instead.
     compound = bool(re.search(r"[;&]|\|\|", stripped))
 
     if not compound:
         for name, pat, repl in REWRITES:
             if pat.match(stripped):
-                return name, pat.sub(repl, stripped)
+                return name, pat.sub(repl, stripped), pkg_warning
 
     if RUNNERS.match(stripped) or compound:
         if os.path.isfile(CTX_GUARD_RUN):
             rule = "compound-wrap" if compound else "runner-wrap"
-            return rule, wrap_generic(cmd)
-    return None
+            return rule, wrap_generic(cmd), pkg_warning
+    return (None, None, pkg_warning) if pkg_warning else None
 
 
 def main() -> None:
@@ -141,23 +148,44 @@ def main() -> None:
         result = transform(cmd)
         if not result:
             return
-        rule, new_cmd = result
+        rule, new_cmd, pkg_warning = result
+
+        if rule is None and new_cmd is None:
+            if pkg_warning:
+                record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
+                decision = build_pretooluse_decision(
+                    reason=f"ctx-guard-pkg: {pkg_warning}",
+                )
+                print(json.dumps(decision))
+            return
+
         if new_cmd is None:
             record_stats_event("blocked", rule=rule, tool_name=tool_name)
-            decision = build_pretooluse_decision(
-                reason="ctx-guard: environment enumeration is blocked to prevent secret leakage",
-                decision="deny",
-            )
+            if rule == "pkg-install-blocked":
+                record_stats_event("pkg_blocked", tool_name=tool_name, reason=pkg_warning)
+                reason = f"ctx-guard-pkg: {pkg_warning}"
+            else:
+                reason = "ctx-guard: environment enumeration is blocked to prevent secret leakage"
+            decision = build_pretooluse_decision(reason=reason, decision="deny")
             print(json.dumps(decision))
             return
+
         if new_cmd == cmd:
+            if pkg_warning:
+                record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
+                decision = build_pretooluse_decision(
+                    reason=f"ctx-guard-pkg: {pkg_warning}",
+                )
+                print(json.dumps(decision))
             return
+
         new_args = {**tool_args, "command": new_cmd}
         record_stats_event("rewrite", rule=rule, tool_name=tool_name)
-        decision = build_pretooluse_decision(
-            reason=f"ctx-guard: rewrote to token-efficient form ({rule})",
-            new_args=new_args,
-        )
+        reason = f"ctx-guard: rewrote to token-efficient form ({rule})"
+        if pkg_warning:
+            record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
+            reason += f" | ctx-guard-pkg: {pkg_warning}"
+        decision = build_pretooluse_decision(reason=reason, new_args=new_args)
         print(json.dumps(decision))
     except Exception as e:
         # Fail open on Claude Code; on Copilot CLI a crash would deny the
