@@ -4,7 +4,13 @@
 
 ctx-guard runs local shell and Python hooks that inspect agent tool calls and
 command output. It does not send command output, statistics, or logs to a
-remote service.
+remote service. The package-install security check (see README) is the one
+exception: for `npm`/`pip`/`cargo`/`gem` install commands, it looks up the
+package name against that ecosystem's public registry (registry.npmjs.org,
+pypi.org, crates.io, rubygems.org) to check existence, publish age, and
+typosquat distance. Only the package name is sent — never command output, file
+contents, or credentials. Set `CTX_GUARD_PKG_CHECK=0` to disable this lookup
+entirely.
 
 ## Sensitive output
 
@@ -54,3 +60,7 @@ unredacted command output.
 - Session identifiers are validated before being used in state-file names.
 - `ctx-guard-uninstall` removes only exact manifest-owned configuration entries
   and preserves modified user files.
+- Package-install registry lookups fail open on any network error (timeout,
+  DNS failure, unexpected status) rather than blocking the command.
+- `~/.ctx-guard/pkg-allowlist` and `.ctx-guard/pkg-allowlist` are read-only
+  configuration inputs; ctx-guard never writes to them.
