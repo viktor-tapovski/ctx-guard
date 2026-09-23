@@ -321,3 +321,73 @@ def registry_lookup(ecosystem: str, name: str):
         return None
 
     return RegistryInfo(exists=True, age_days=_extract_age_days(ecosystem, data))
+
+
+@dataclasses.dataclass
+class PkgCheckResult:
+    action: str  # "block" | "warn"
+    reason: str
+
+
+def check_command(cmd: str, cwd: str = None):
+    if os.environ.get("CTX_GUARD_PKG_CHECK", "1") == "0":
+        return None
+
+    if has_pipe_to_shell(cmd):
+        return PkgCheckResult(
+            action="warn",
+            reason="pipes a remote script directly into a shell (curl|bash / wget|sh) -- review before running",
+        )
+
+    install_cmd = detect_install_command(cmd)
+    if install_cmd is None or install_cmd.manifest_only or not install_cmd.packages:
+        return None
+
+    allowlist = load_allowlist(cwd=cwd)
+    warnings = []
+    block_reasons = []
+
+    bypass_flag = has_bypass_flag(cmd)
+    if bypass_flag:
+        warnings.append(f"command uses '{bypass_flag}', bypassing a normal confirmation prompt")
+
+    for pkg in install_cmd.packages:
+        if is_allowlisted(pkg.name, allowlist):
+            continue
+
+        if pkg.is_url:
+            warnings.append(f"'{pkg.name}' is a git/URL-based install -- unverifiable source, not from a package registry")
+            continue
+
+        if install_cmd.ecosystem not in REGISTRY_ECOSYSTEMS:
+            continue  # apt/brew/apk: no registry, no meaningful version-pin concept
+
+        if not pkg.pinned:
+            warnings.append(f"'{pkg.name}' has no version pin")
+
+        info = registry_lookup(install_cmd.ecosystem, pkg.name)
+        if info is None:
+            continue  # registry unreachable -- fail open, structural warnings above still stand
+
+        if not info.exists:
+            block_reasons.append(
+                f"'{pkg.name}' does not exist on the {install_cmd.ecosystem} registry "
+                "(possible hallucinated or typosquatted package name)"
+            )
+            continue
+
+        if info.age_days is not None and info.age_days < AGE_WARN_DAYS:
+            warnings.append(f"'{pkg.name}' was published {info.age_days:.1f} days ago (< {AGE_WARN_DAYS}d)")
+
+        match = typosquat_match(pkg.name, install_cmd.ecosystem)
+        if match:
+            warnings.append(f"'{pkg.name}' is within edit-distance {TYPOSQUAT_MAX_DISTANCE} of popular package '{match}' -- possible typosquat")
+
+    if block_reasons:
+        return PkgCheckResult(action="block", reason="; ".join(block_reasons))
+    if warnings:
+        return PkgCheckResult(action="warn", reason="; ".join(warnings))
+    return None
+
+
+    return RegistryInfo(exists=True, age_days=_extract_age_days(ecosystem, data))
