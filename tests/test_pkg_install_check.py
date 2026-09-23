@@ -215,5 +215,81 @@ class TestAllowlist(unittest.TestCase):
             self.assertEqual(patterns, [])
 
 
+import json as _json
+import time
+import urllib.error
+
+
+class TestRegistryLookup(unittest.TestCase):
+    def _fake_urlopen_json(self, payload: dict, status: int = 200):
+        body = _json.dumps(payload).encode("utf-8")
+
+        class _Resp:
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
+            def read(self_):
+                return body
+
+            def getcode(self_):
+                return status
+
+        return _Resp()
+
+    def test_npm_existing_package(self):
+        now_iso = "2020-01-01T00:00:00.000Z"
+        payload = {"dist-tags": {"latest": "1.0.0"}, "time": {"1.0.0": now_iso}}
+        with mock.patch("pkg_install_check.urllib.request.urlopen", return_value=self._fake_urlopen_json(payload)):
+            info = pic.registry_lookup("npm", "left-pad")
+        self.assertTrue(info.exists)
+        self.assertGreater(info.age_days, 300)  # published in 2020, clearly >7 days old
+
+    def test_npm_recently_published_package(self):
+        recent_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 3600))
+        payload = {"dist-tags": {"latest": "0.0.1"}, "time": {"0.0.1": recent_iso}}
+        with mock.patch("pkg_install_check.urllib.request.urlopen", return_value=self._fake_urlopen_json(payload)):
+            info = pic.registry_lookup("npm", "brand-new-pkg")
+        self.assertTrue(info.exists)
+        self.assertLess(info.age_days, 1)
+
+    def test_nonexistent_package_404(self):
+        err = urllib.error.HTTPError("url", 404, "Not Found", {}, None)
+        with mock.patch("pkg_install_check.urllib.request.urlopen", side_effect=err):
+            info = pic.registry_lookup("npm", "totally-fake-hallucinated-pkg-xyz")
+        self.assertFalse(info.exists)
+
+    def test_network_timeout_fails_open(self):
+        with mock.patch(
+            "pkg_install_check.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("timed out"),
+        ):
+            info = pic.registry_lookup("npm", "left-pad")
+        self.assertIsNone(info)
+
+    def test_pypi_existing_package(self):
+        payload = {
+            "info": {"version": "2.31.0"},
+            "releases": {"2.31.0": [{"upload_time_iso_8601": "2020-01-01T00:00:00Z"}]},
+        }
+        with mock.patch("pkg_install_check.urllib.request.urlopen", return_value=self._fake_urlopen_json(payload)):
+            info = pic.registry_lookup("pip", "requests")
+        self.assertTrue(info.exists)
+
+    def test_crates_existing_package(self):
+        payload = {"crate": {"created_at": "2020-01-01T00:00:00Z"}}
+        with mock.patch("pkg_install_check.urllib.request.urlopen", return_value=self._fake_urlopen_json(payload)):
+            info = pic.registry_lookup("cargo", "serde")
+        self.assertTrue(info.exists)
+
+    def test_gems_existing_package(self):
+        payload = {"version_created_at": "2020-01-01T00:00:00Z"}
+        with mock.patch("pkg_install_check.urllib.request.urlopen", return_value=self._fake_urlopen_json(payload)):
+            info = pic.registry_lookup("gem", "rails")
+        self.assertTrue(info.exists)
+
+
 if __name__ == "__main__":
     unittest.main()
