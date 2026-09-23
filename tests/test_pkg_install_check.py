@@ -1,6 +1,8 @@
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "hooks"))
@@ -179,6 +181,38 @@ class TestTyposquat(unittest.TestCase):
 
     def test_typosquat_match_unrelated_name_not_flagged(self):
         self.assertIsNone(pic.typosquat_match("my-totally-unique-internal-tool", "pip"))
+
+
+class TestAllowlist(unittest.TestCase):
+    def test_is_allowlisted_exact_match(self):
+        self.assertTrue(pic.is_allowlisted("left-pad", ["left-pad"]))
+
+    def test_is_allowlisted_glob_match(self):
+        self.assertTrue(pic.is_allowlisted("@yourorg/internal-lib", ["@yourorg/*"]))
+
+    def test_is_allowlisted_no_match(self):
+        self.assertFalse(pic.is_allowlisted("left-pad", ["@yourorg/*"]))
+
+    def test_load_allowlist_merges_global_and_repo(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo:
+            os.makedirs(os.path.join(home, ".ctx-guard"))
+            with open(os.path.join(home, ".ctx-guard", "pkg-allowlist"), "w") as f:
+                f.write("# comment\n@yourorg/*\n\n")
+            os.makedirs(os.path.join(repo, ".ctx-guard"))
+            with open(os.path.join(repo, ".ctx-guard", "pkg-allowlist"), "w") as f:
+                f.write("internal-tool\n")
+
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                patterns = pic.load_allowlist(cwd=repo)
+
+            self.assertIn("@yourorg/*", patterns)
+            self.assertIn("internal-tool", patterns)
+
+    def test_load_allowlist_missing_files_returns_empty(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo:
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                patterns = pic.load_allowlist(cwd=repo)
+            self.assertEqual(patterns, [])
 
 
 if __name__ == "__main__":

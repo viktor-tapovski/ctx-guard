@@ -219,3 +219,28 @@ def typosquat_match(name: str, ecosystem: str):
         if levenshtein(lowered, popular.lower()) <= TYPOSQUAT_MAX_DISTANCE:
             return popular
     return None
+
+
+def _read_allowlist_file(path: str) -> list:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [
+                line.strip()
+                for line in f
+                if line.strip() and not line.strip().startswith("#")
+            ]
+    except OSError:
+        return []
+
+
+def load_allowlist(cwd: str = None) -> list:
+    global_path = os.path.join(os.path.expanduser("~"), ".ctx-guard", "pkg-allowlist")
+    patterns = _read_allowlist_file(global_path)
+    if cwd:
+        repo_path = os.path.join(cwd, ".ctx-guard", "pkg-allowlist")
+        patterns = patterns + [p for p in _read_allowlist_file(repo_path) if p not in patterns]
+    return patterns
+
+
+def is_allowlisted(name: str, patterns: list) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in patterns)
