@@ -15,7 +15,7 @@ MANIFEST="$DEST/install-manifest.json"
 PYTHON_BIN="$(python3 -c 'import sys; print(sys.executable)')"
 
 echo "Installing ctx-guard to $DEST ..."
-mkdir -p "$DEST/hooks/lib" "$DEST/bin" "$HOME/.claude/agents" "$COPILOT_HOOKS_DIR" \
+mkdir -p "$DEST/hooks/lib" "$DEST/hooks/lib/popular_packages" "$DEST/bin" "$HOME/.claude/agents" "$COPILOT_HOOKS_DIR" \
          "$RUN_DIR"/{logs,scripts,state}
 chmod 700 "$RUN_DIR" "$RUN_DIR"/logs "$RUN_DIR"/scripts "$RUN_DIR"/state
 
@@ -32,6 +32,7 @@ rm -rf "$HOME/.claude/ctx-guard" 2>/dev/null || true
 cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
 cp "$SRC"/hooks/*.py                   "$DEST/hooks/"
 cp "$SRC"/hooks/lib/*.py               "$DEST/hooks/lib/"
+cp "$SRC"/hooks/lib/popular_packages/*.txt "$DEST/hooks/lib/popular_packages/"
 chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
 
 python3 - "$SRC" "$DEST" "$HOME/.claude/agents" "$MANIFEST" <<'PYEOF'

@@ -155,6 +155,7 @@ def main() -> None:
                 record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
                 decision = build_pretooluse_decision(
                     reason=f"ctx-guard-pkg: {pkg_warning}",
+                    decision="ask",
                 )
                 print(json.dumps(decision))
             return
@@ -175,6 +176,7 @@ def main() -> None:
                 record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
                 decision = build_pretooluse_decision(
                     reason=f"ctx-guard-pkg: {pkg_warning}",
+                    decision="ask",
                 )
                 print(json.dumps(decision))
             return
@@ -185,7 +187,11 @@ def main() -> None:
         if pkg_warning:
             record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
             reason += f" | ctx-guard-pkg: {pkg_warning}"
-        decision = build_pretooluse_decision(reason=reason, new_args=new_args)
+        if pkg_warning:
+            # A pkg warning must surface the human permission prompt, not auto-approve.
+            decision = build_pretooluse_decision(reason=reason, new_args=new_args, decision="ask")
+        else:
+            decision = build_pretooluse_decision(reason=reason, new_args=new_args)
         print(json.dumps(decision))
     except Exception as e:
         # Fail open on Claude Code; on Copilot CLI a crash would deny the

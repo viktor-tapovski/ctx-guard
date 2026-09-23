@@ -27,6 +27,9 @@ import shlex
 TIMEOUT = 1.5
 AGE_WARN_DAYS = 7
 TYPOSQUAT_MAX_DISTANCE = 2
+# Names shorter than this sit within edit-distance 2 of too many real
+# packages (six/pip, ring/rand) for a match to be meaningful signal.
+TYPOSQUAT_MIN_LENGTH = 5
 
 LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
 POPULAR_PACKAGES_DIR = os.path.join(LIB_DIR, "popular_packages")
@@ -45,23 +48,32 @@ PIPE_TO_SHELL = re.compile(
     r"(curl|wget)\b[^|]*\|\s*(sudo\s+)?(bash|sh)\b"
 )
 
-# (ecosystem, regex matching the command head, group(1) = the argument tail)
+# (ecosystem, regex matching the command head, single_package_only).
+# group(1) = the argument tail. single_package_only is True for the
+# run-and-execute forms (npx / pipx run / uvx): only the first positional is
+# the package; everything after it is the wrapped tool's own argv.
 _ECOSYSTEM_HEAD = [
-    ("npm", re.compile(r"^(?:npm|pnpm|yarn)\s+(?:install|i|add)\s*(.*)$")),
-    ("npm", re.compile(r"^npx\s+(.*)$")),
-    ("pip", re.compile(r"^(?:pip|pip3)\s+install\s*(.*)$")),
-    ("pip", re.compile(r"^pipx\s+run\s+(.*)$")),
-    ("pip", re.compile(r"^uvx\s+(.*)$")),
-    ("cargo", re.compile(r"^cargo\s+install\s*(.*)$")),
-    ("gem", re.compile(r"^gem\s+install\s*(.*)$")),
-    ("apt", re.compile(r"^(?:apt|apt-get)\s+install\s*(.*)$")),
-    ("brew", re.compile(r"^brew\s+install\s*(.*)$")),
-    ("apk", re.compile(r"^apk\s+add\s*(.*)$")),
+    ("npm", re.compile(r"^(?:npm|pnpm|yarn)\s+(?:install|i|add)\s*(.*)$"), False),
+    ("npm", re.compile(r"^npx\s+(.*)$"), True),
+    ("pip", re.compile(r"^(?:pip|pip3)\s+install\s*(.*)$"), False),
+    ("pip", re.compile(r"^pipx\s+run\s+(.*)$"), True),
+    ("pip", re.compile(r"^uvx\s+(.*)$"), True),
+    ("cargo", re.compile(r"^cargo\s+install\s*(.*)$"), False),
+    ("gem", re.compile(r"^gem\s+install\s*(.*)$"), False),
+    ("apt", re.compile(r"^(?:apt|apt-get)\s+install\s*(.*)$"), False),
+    ("brew", re.compile(r"^brew\s+install\s*(.*)$"), False),
+    ("apk", re.compile(r"^apk\s+add\s*(.*)$"), False),
 ]
 
 _MANIFEST_FLAGS = {"-r", "--requirement"}
 
 _URL_TOKEN = re.compile(r"^(?:[a-z][a-z0-9+.-]*://|git\+)", re.IGNORECASE)
+
+# Local filesystem paths / archives are not registry-lookupable package names.
+_LOCAL_PATH = re.compile(r"^(\.{1,2}(/|$)|/|~/)|\.(whl|tar\.gz|tgz|zip)$", re.IGNORECASE)
+
+# pip version-specifier operators, longest/most-specific first.
+_PIP_VERSION_SEPARATORS = ("===", "==", "!=", "~=", ">=", "<=", ">", "<")
 
 # Truncate the argument tail at the first compound-command separator so a
 # chained command (e.g. "npm install left-pad && npm test") only yields the
@@ -101,9 +113,10 @@ def _split_name_and_pin(token: str, ecosystem: str) -> tuple[str, bool]:
             return token, False
         return token[:at], True
     if ecosystem == "pip":
-        for sep in ("==", ">=", "<=", "~="):
+        token = re.sub(r"\[[^\]]*\]", "", token)  # drop extras: requests[security]
+        for sep in _PIP_VERSION_SEPARATORS:
             if sep in token:
-                return token.split(sep, 1)[0], True
+                return token.split(sep, 1)[0].strip(), True
         return token, False
     # cargo/gem: version comes from a separate -v/--version flag, handled
     # by the caller; a bare token here is never self-pinned.
@@ -113,7 +126,7 @@ def _split_name_and_pin(token: str, ecosystem: str) -> tuple[str, bool]:
 def detect_install_command(cmd: str):
     """Return an InstallCommand, or None if cmd isn't install-shaped."""
     stripped = cmd.strip()
-    for ecosystem, pattern in _ECOSYSTEM_HEAD:
+    for ecosystem, pattern, single_package_only in _ECOSYSTEM_HEAD:
         match = pattern.match(stripped)
         if not match:
             continue
@@ -143,9 +156,12 @@ def detect_install_command(cmd: str):
         if manifest_only or not names:
             return InstallCommand(ecosystem=ecosystem, packages=[], manifest_only=True)
 
+        if single_package_only:
+            names = names[:1]
+
         packages = []
         for name in names:
-            if _URL_TOKEN.match(name) or ("://" in name):
+            if _URL_TOKEN.match(name) or ("://" in name) or _LOCAL_PATH.search(name):
                 packages.append(PackageSpec(name=name, pinned=False, is_url=True))
                 continue
             base_name, pinned = _split_name_and_pin(name, ecosystem)
@@ -210,14 +226,22 @@ def levenshtein(a: str, b: str) -> int:
 
 
 def typosquat_match(name: str, ecosystem: str):
+    popular = load_popular_packages(ecosystem)
+    popular_lower = {p.lower() for p in popular}
     lowered = name.lower()
-    for popular in load_popular_packages(ecosystem):
-        if lowered == popular.lower():
-            return None
-        if abs(len(lowered) - len(popular)) > TYPOSQUAT_MAX_DISTANCE:
+    # npm scopes are namespace-owned, so compare the bare name: "@babel/core"
+    # is judged as "core", "@types/react" as "react" (exact -> not flagged).
+    bare = lowered.split("/", 1)[-1] if lowered.startswith("@") else lowered
+    if lowered in popular_lower or bare in popular_lower:
+        return None
+    if len(bare) < TYPOSQUAT_MIN_LENGTH:
+        return None
+    for candidate in popular:
+        cand = candidate.lower()
+        if abs(len(bare) - len(cand)) > TYPOSQUAT_MAX_DISTANCE:
             continue
-        if levenshtein(lowered, popular.lower()) <= TYPOSQUAT_MAX_DISTANCE:
-            return popular
+        if levenshtein(bare, cand) <= TYPOSQUAT_MAX_DISTANCE:
+            return candidate
     return None
 
 
