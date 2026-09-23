@@ -151,5 +151,35 @@ class TestBypassFlagAndPipeToShell(unittest.TestCase):
         self.assertFalse(pic.has_pipe_to_shell("curl -sSL https://example.com/file.json"))
 
 
+class TestTyposquat(unittest.TestCase):
+    def test_levenshtein_identical(self):
+        self.assertEqual(pic.levenshtein("react", "react"), 0)
+
+    def test_levenshtein_one_substitution(self):
+        self.assertEqual(pic.levenshtein("react", "react"[::-1][::-1]), 0)  # sanity no-op
+        self.assertEqual(pic.levenshtein("requests", "reqeusts"), 2)
+
+    def test_levenshtein_one_edit(self):
+        self.assertEqual(pic.levenshtein("axios", "axio"), 1)
+
+    def test_load_popular_packages_npm(self):
+        names = pic.load_popular_packages("npm")
+        self.assertIn("react", names)
+        self.assertIn("express", names)
+
+    def test_load_popular_packages_unknown_ecosystem_empty(self):
+        self.assertEqual(pic.load_popular_packages("apt"), [])
+
+    def test_typosquat_match_close_name_flagged(self):
+        match = pic.typosquat_match("reqeusts", "pip")  # transposed, distance 2 from "requests"
+        self.assertEqual(match, "requests")
+
+    def test_typosquat_match_exact_name_not_flagged(self):
+        self.assertIsNone(pic.typosquat_match("requests", "pip"))
+
+    def test_typosquat_match_unrelated_name_not_flagged(self):
+        self.assertIsNone(pic.typosquat_match("my-totally-unique-internal-tool", "pip"))
+
+
 if __name__ == "__main__":
     unittest.main()

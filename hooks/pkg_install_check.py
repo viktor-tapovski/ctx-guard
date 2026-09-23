@@ -167,3 +167,55 @@ def has_bypass_flag(cmd: str):
 
 def has_pipe_to_shell(cmd: str) -> bool:
     return bool(PIPE_TO_SHELL.search(cmd))
+
+
+_POPULAR_CACHE: dict = {}
+
+
+def load_popular_packages(ecosystem: str) -> list:
+    if ecosystem not in REGISTRY_ECOSYSTEMS:
+        return []
+    if ecosystem in _POPULAR_CACHE:
+        return _POPULAR_CACHE[ecosystem]
+    filename = {"npm": "npm.txt", "pip": "pypi.txt", "cargo": "crates.txt", "gem": "gems.txt"}[ecosystem]
+    path = os.path.join(POPULAR_PACKAGES_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            names = [line.strip() for line in f if line.strip()]
+    except OSError:
+        names = []
+    _POPULAR_CACHE[ecosystem] = names
+    return names
+
+
+def levenshtein(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            curr[j] = min(
+                prev[j] + 1,       # deletion
+                curr[j - 1] + 1,   # insertion
+                prev[j - 1] + cost,  # substitution
+            )
+        prev = curr
+    return prev[-1]
+
+
+def typosquat_match(name: str, ecosystem: str):
+    lowered = name.lower()
+    for popular in load_popular_packages(ecosystem):
+        if lowered == popular.lower():
+            return None
+        if abs(len(lowered) - len(popular)) > TYPOSQUAT_MAX_DISTANCE:
+            continue
+        if levenshtein(lowered, popular.lower()) <= TYPOSQUAT_MAX_DISTANCE:
+            return popular
+    return None
