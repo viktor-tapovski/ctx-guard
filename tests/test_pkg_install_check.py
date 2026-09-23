@@ -123,6 +123,74 @@ class TestDetectInstallCommand(unittest.TestCase):
         self.assertEqual(result.packages[0].name, "left-pad")
         self.assertEqual(len(result.packages), 1)
 
+    def test_npx_wrapped_tool_args_not_treated_as_packages(self):
+        result = pic.detect_install_command("npx jest tests/foo.test.ts")
+        self.assertEqual(len(result.packages), 1)
+        self.assertEqual(result.packages[0].name, "jest")
+
+    def test_npx_wrapped_tool_flags_and_paths_not_treated_as_packages(self):
+        result = pic.detect_install_command("npx prettier --write src/")
+        self.assertEqual(len(result.packages), 1)
+        self.assertEqual(result.packages[0].name, "prettier")
+
+    def test_uvx_wrapped_tool_args_not_treated_as_packages(self):
+        result = pic.detect_install_command("uvx ruff check src")
+        self.assertEqual(len(result.packages), 1)
+        self.assertEqual(result.packages[0].name, "ruff")
+
+    def test_pipx_run_wrapped_tool_args_not_treated_as_packages(self):
+        result = pic.detect_install_command("pipx run black src tests")
+        self.assertEqual(len(result.packages), 1)
+        self.assertEqual(result.packages[0].name, "black")
+
+    def test_npm_install_multi_package_still_checks_all(self):
+        result = pic.detect_install_command("npm install left-pad lodash react")
+        self.assertEqual([p.name for p in result.packages], ["left-pad", "lodash", "react"])
+
+    def test_pip_install_editable_dot_is_local_path(self):
+        result = pic.detect_install_command("pip install -e .")
+        self.assertEqual(len(result.packages), 1)
+        self.assertTrue(result.packages[0].is_url)
+
+    def test_pip_install_dot_is_local_path(self):
+        result = pic.detect_install_command("pip install .")
+        self.assertEqual(len(result.packages), 1)
+        self.assertTrue(result.packages[0].is_url)
+
+    def test_pip_install_relative_path_and_wheel_are_local(self):
+        for cmd in ("pip install ../lib", "pip install ./pkg", "pip install /abs/pkg",
+                    "pip install ~/src/pkg", "pip install dist/foo-1.0-py3-none-any.whl",
+                    "pip install foo-1.0.tar.gz"):
+            result = pic.detect_install_command(cmd)
+            self.assertTrue(result.packages[0].is_url, cmd)
+
+    def test_cargo_install_path_dot_is_local_path(self):
+        result = pic.detect_install_command("cargo install --path .")
+        self.assertEqual(len(result.packages), 1)
+        self.assertTrue(result.packages[0].is_url)
+
+    def test_pip_install_extras_stripped_and_pinned(self):
+        result = pic.detect_install_command("pip install 'requests[security]==2.31.0'")
+        self.assertEqual(result.packages[0].name, "requests")
+        self.assertTrue(result.packages[0].pinned)
+        self.assertFalse(result.packages[0].is_url)
+
+    def test_pip_install_extras_unpinned(self):
+        result = pic.detect_install_command("pip install 'requests[security]'")
+        self.assertEqual(result.packages[0].name, "requests")
+        self.assertFalse(result.packages[0].pinned)
+
+    def test_pip_install_greater_than_is_pinned(self):
+        result = pic.detect_install_command("pip install 'requests>2'")
+        self.assertEqual(result.packages[0].name, "requests")
+        self.assertTrue(result.packages[0].pinned)
+
+    def test_pip_install_other_specifiers_pinned(self):
+        for spec in ("requests<3", "requests!=2.0", "requests===2.31.0", "requests>=2", "requests~=2.31"):
+            result = pic.detect_install_command(f"pip install '{spec}'")
+            self.assertEqual(result.packages[0].name, "requests", spec)
+            self.assertTrue(result.packages[0].pinned, spec)
+
 
 class TestBypassFlagAndPipeToShell(unittest.TestCase):
     def test_force_flag_detected(self):
@@ -181,6 +249,34 @@ class TestTyposquat(unittest.TestCase):
 
     def test_typosquat_match_unrelated_name_not_flagged(self):
         self.assertIsNone(pic.typosquat_match("my-totally-unique-internal-tool", "pip"))
+
+    def test_typosquat_exact_match_wins_over_earlier_near_match(self):
+        # "jest" precedes "next" in npm.txt and is within distance 2
+        self.assertIsNone(pic.typosquat_match("next", "npm"))
+        self.assertIsNone(pic.typosquat_match("vite", "npm"))
+        self.assertIsNone(pic.typosquat_match("cors", "npm"))
+
+    def test_typosquat_no_popular_list_entry_flags_another(self):
+        for eco in ("npm", "pip", "cargo", "gem"):
+            for name in pic.load_popular_packages(eco):
+                self.assertIsNone(pic.typosquat_match(name, eco), f"{eco}:{name}")
+
+    def test_typosquat_short_names_never_flagged(self):
+        self.assertIsNone(pic.typosquat_match("sxi", "pip"))
+        self.assertIsNone(pic.typosquat_match("rinq", "cargo"))
+
+    def test_typosquat_scoped_package_not_flagged_against_unscoped(self):
+        self.assertIsNone(pic.typosquat_match("@babel/core", "npm"))
+        self.assertIsNone(pic.typosquat_match("@types/react", "npm"))
+
+    def test_typosquat_scoped_bare_name_still_checked(self):
+        self.assertEqual(pic.typosquat_match("@evil/expresss", "npm"), "express")
+
+    @unittest.expectedFailure
+    def test_typosquat_black_not_flagged_as_flask(self):
+        # Known residual: "black" (5 chars, real/popular) is not in pypi.txt
+        # and is distance 2 from "flask", so it still flags.
+        self.assertIsNone(pic.typosquat_match("black", "pip"))
 
 
 class TestAllowlist(unittest.TestCase):
@@ -382,6 +478,14 @@ class TestCheckCommand(unittest.TestCase):
         result = pic.check_command("pip install git+https://github.com/foo/bar.git")
         self.assertEqual(result.action, "warn")
         self.assertIn("unverifiable", result.reason.lower())
+
+    def test_local_path_installs_warn_unverifiable_without_registry_lookup(self):
+        with mock.patch("pkg_install_check.urllib.request.urlopen") as urlopen:
+            for cmd in ("pip install -e .", "pip install .", "cargo install --path ."):
+                result = pic.check_command(cmd)
+                self.assertEqual(result.action, "warn", cmd)
+                self.assertIn("unverifiable", result.reason.lower(), cmd)
+            urlopen.assert_not_called()
 
     def test_bypass_flag_warns(self):
         result = pic.check_command("apt install curl -y")
