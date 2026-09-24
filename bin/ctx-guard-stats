@@ -149,6 +149,9 @@ def print_gauge(summary: dict) -> None:
             parts.append(f"{rewrites} rewrite{'' if rewrites == 1 else 's'}")
         if observed["total_tool_output_bytes"]:
             parts.append(f"{fmt_bytes(observed['total_tool_output_bytes'])} tool output")
+        if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
+            parts.append(f"pkg-guard: {summary['pkg_blocked_count']} blocked, "
+                         f"{summary['pkg_warned_count']} warned")
         if not parts:
             n = summary["events"]
             parts.append(f"{n} event{'' if n == 1 else 's'}")
@@ -159,9 +162,14 @@ def print_gauge(summary: dict) -> None:
     pct = measured["compression_ratio_pct"]
     bar = f"{render_bar(pct, 100)} " if bars else ""
     head = f"{pct}%" if bars else f"{pct}% reduction"
+    tail = ""
+    if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
+        tail = (f"{sep}pkg-guard: {summary['pkg_blocked_count']} blocked, "
+                f"{summary['pkg_warned_count']} warned")
     print(f"ctx-guard  {bar}{head}"
           f"{sep}{fmt_bytes(measured['saved_bytes'])} saved"
-          f"{sep}~{fmt_tokens(measured['saved_tokens_est'])} tokens")
+          f"{sep}~{fmt_tokens(measured['saved_tokens_est'])} tokens"
+          f"{tail}")
 
 
 def main() -> None:
@@ -232,6 +240,10 @@ def main() -> None:
         tool_bytes_by_tool[e.get("tool_name", "unknown")] += e.get("result_bytes", 0)
     total_tool_bytes = sum(tool_bytes_by_tool.values())
 
+    # --- OBSERVED: pkg-install security checks ---
+    pkg_blocked = [e for e in events if e.get("kind") == "pkg_blocked"]
+    pkg_warned = [e for e in events if e.get("kind") == "pkg_warned"]
+
     summary = {
         "events": len(events),
         "agents": {a: len(evs) for a, evs in by_agent.items()},
@@ -250,6 +262,8 @@ def main() -> None:
             "tool_output_bytes_by_tool": dict(tool_bytes_by_tool),
             "total_tool_output_bytes": total_tool_bytes,
         },
+        "pkg_blocked_count": len(pkg_blocked),
+        "pkg_warned_count": len(pkg_warned),
     }
 
     if args.json:
@@ -286,6 +300,9 @@ def main() -> None:
     max_tool = max((b for _, b in top_tools), default=0)
     for tool, nbytes in top_tools:
         print_bar(tool, nbytes, max_tool, fmt_bytes(nbytes))
+    print(f"  packages blocked (nonexistent/hallucinated): {summary['pkg_blocked_count']}")
+    print(f"  packages warned (age/typosquat/unpinned/unverifiable/bypass-flag): "
+          f"{summary['pkg_warned_count']}")
 
 
 if __name__ == "__main__":
