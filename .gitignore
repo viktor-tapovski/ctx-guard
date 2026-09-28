@@ -11,3 +11,6 @@ ctx-guard-*/
 # Editor and OS metadata
 .idea/
 .vscode/
+
+# Local worktrees
+.worktrees/
