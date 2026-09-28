@@ -6,7 +6,8 @@
 #
 # Usage: ctx-guard-run <script-file>
 # Env:   CTX_GUARD_MAX_LINES          (default 150)  max lines returned to context
-#        CTX_GUARD_LOG_DIR            (default /tmp/ctx-guard-<uid>/logs)
+#        CTX_GUARD_LOG_DIR            (default /tmp/ctx-guard-<uid>/logs; falls
+#                                     back to $TMPDIR when that is not writable)
 #        CTX_GUARD_LOG_RETENTION_DAYS (default 7)     delete archived logs older than this
 #        CTX_GUARD_STATE_DIR          (default /tmp/ctx-guard-<uid>/state) stats.jsonl lives here
 #        CTX_GUARD_AGENT              (default "unknown") tag written into stats events
@@ -14,19 +15,45 @@
 set -uo pipefail
 
 MAX_LINES="${CTX_GUARD_MAX_LINES:-150}"
-LOG_DIR="${CTX_GUARD_LOG_DIR:-/tmp/ctx-guard-$(id -u)/logs}"
+DEFAULT_ROOT="/tmp/ctx-guard-$(id -u)"
+LOG_DIR="${CTX_GUARD_LOG_DIR:-$DEFAULT_ROOT/logs}"
 RETENTION_DAYS="${CTX_GUARD_LOG_RETENTION_DAYS:-7}"
 REDACT_LOGS="${CTX_GUARD_REDACT_LOGS:-1}"
-STATE_DIR="${CTX_GUARD_STATE_DIR:-/tmp/ctx-guard-$(id -u)/state}"
-STATS_FILE="${CTX_GUARD_STATS_FILE:-$STATE_DIR/stats.jsonl}"
+STATE_DIR="${CTX_GUARD_STATE_DIR:-$DEFAULT_ROOT/state}"
 AGENT="${CTX_GUARD_AGENT:-unknown}"
-mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+SCRIPT="$1"
+
+usable_dir() {
+  local dir="$1" probe
+  mkdir -p "$dir" 2>/dev/null || return 1
+  probe="$(mktemp "$dir/probe-XXXXXXXX" 2>/dev/null)" || return 1
+  rm -f "$probe"
+}
+
+TMP_ROOT="${TMPDIR:-/tmp}"
+FALLBACK_ROOT="${TMP_ROOT%/}/ctx-guard-$(id -u)"
+
+if ! usable_dir "$LOG_DIR"; then
+  LOG_DIR="$FALLBACK_ROOT/logs"
+  if ! usable_dir "$LOG_DIR"; then
+    # Nowhere to archive output: run uncapped rather than failing the command.
+    echo "ctx-guard: no writable log dir, running without output capping" >&2
+    bash "$SCRIPT"
+    STATUS=$?
+    rm -f "$SCRIPT"
+    exit $STATUS
+  fi
+fi
+
+usable_dir "$STATE_DIR" || STATE_DIR="$FALLBACK_ROOT/state"
+STATS_FILE="${CTX_GUARD_STATS_FILE:-$STATE_DIR/stats.jsonl}"
+
 chmod 700 "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
 
 # Self-prune: archived logs are never rotated elsewhere, so do it here on every run.
 find "$LOG_DIR" -maxdepth 1 -name 'run-*' -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
 
-SCRIPT="$1"
 # BSD/macOS mktemp only randomizes trailing Xs -- anything after them (like a
 # ".log" suffix) is taken literally, silently reusing the same filename every
 # call. Keep the Xs at the very end and match "run-*" for retention instead.
