@@ -10,7 +10,9 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SCRATCH="$(mktemp -d)"
+# Explicit template: BSD mktemp ignores $TMPDIR for bare `-d`, which breaks
+# sandboxed runs where only $TMPDIR is writable.
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ctx-guard-smoke-XXXXXXXX")" || exit 1
 trap 'rm -rf "$SCRATCH"' EXIT
 
 export CTX_GUARD_RUN="$DIR/bin/ctx-guard-run"
@@ -198,6 +200,32 @@ if [ -f "$CTX_GUARD_LOG_DIR/run-stale" ]; then
 else
   ok "stale log pruned by retention"
 fi
+
+# sandboxed agents (e.g. Claude Code) cannot write /tmp/ctx-guard-<uid>: the
+# wrapper must degrade to $TMPDIR instead of failing the wrapped command.
+RO="$SCRATCH/readonly"
+mkdir -p "$RO"
+chmod 500 "$RO"
+FB_TMP="$SCRATCH/fallback-tmp"
+mkdir -p "$FB_TMP"
+SMALL3="$SCRATCH/small3.sh"; echo 'echo fallback-ok' > "$SMALL3"
+out=$(CTX_GUARD_LOG_DIR="$RO/logs" CTX_GUARD_STATE_DIR="$RO/state" \
+      TMPDIR="$FB_TMP" "$CTX_GUARD_RUN" "$SMALL3" 2>/dev/null)
+[ "$out" = "fallback-ok" ] && ok "unwritable log dir falls back instead of failing" \
+  || bad "unwritable log dir -> $out"
+if find "$FB_TMP/ctx-guard-$(id -u)/logs" -name 'run-*' 2>/dev/null | grep -q .; then
+  ok "fallback log archived under \$TMPDIR"
+else
+  bad "no fallback log under \$TMPDIR"
+fi
+
+# last resort: nowhere writable at all -- still run the command, just uncapped.
+SMALL4="$SCRATCH/small4.sh"; echo 'echo passthrough-ok' > "$SMALL4"
+out=$(CTX_GUARD_LOG_DIR="$RO/logs" CTX_GUARD_STATE_DIR="$RO/state" \
+      TMPDIR="$RO/tmp" "$CTX_GUARD_RUN" "$SMALL4" 2>/dev/null)
+[ "$out" = "passthrough-ok" ] && ok "no writable dir anywhere: command still runs" \
+  || bad "no writable dir anywhere -> $out"
+chmod 700 "$RO"
 
 # --- stats.jsonl (written by ctx-guard-run above) --------------------------
 

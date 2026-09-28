@@ -9,5 +9,6 @@ module.exports = {
     // and MEASURED all come up in this codebase. Keep the rule for the cases
     // that are genuinely sloppy and drop sentence-case from the list.
     "subject-case": [2, "never", ["start-case", "pascal-case", "upper-case"]],
+    "header-max-length": [2, "always", 200],
   },
 };
