@@ -114,12 +114,18 @@ if os.path.isfile(settings_path):
 hooks = settings.setdefault("hooks", {})
 
 def add(event, matcher, cmd):
+    # Match on the hook script path, not the full command: a different python
+    # interpreter path would otherwise register the same hook twice and double
+    # every stats event. Stale copies are dropped and the current one appended.
+    script = shlex.split(cmd)[-1]
     entries = hooks.setdefault(event, [])
+    kept = []
     for e in entries:
-        for h in e.get("hooks", []):
-            if h.get("command") == cmd:
-                return  # already installed
-    entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]})
+        e["hooks"] = [h for h in e.get("hooks", []) if script not in h.get("command", "")]
+        if e["hooks"]:
+            kept.append(e)
+    kept.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]})
+    hooks[event] = kept
 
 # Claude Code hook entries don't have a separate "env" field, so the agent
 # tag is set inline in the shell command string.

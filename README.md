@@ -147,7 +147,8 @@ per-rule / per-tool breakdowns each get their own bar. It is split into two
 honestly-labeled sections:
 
 - **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
-- **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`) and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof.
+- **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`) and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof. The exception is read-only git rewrites (`git status`, `git log`, `git diff`, `git show`, `git branch -a`): the hook runs both forms (2s timeout) and records the real before/after bytes as MEASURED. Because the hook runs outside any agent sandbox while `.git/config` is writable from inside it, measurement only happens when every repo-local git config key is on an inert allowlist (no filters, includes, gpg, aliases, ...); otherwise the rewrite falls back to an ESTIMATE.
+- **ESTIMATED** — rewrites that couldn't be measured (`grep`/`find`/`cat`/`docker`/`kubectl`/...). The returned bytes are known; the unbounded size is assumed from a per-rule reduction ratio (`ESTIMATE_RATIOS` in `hooks/lib/ctx_guard_common.py`, overridable with a JSON object in `$CTX_GUARD_ESTIMATE_RATIOS`). Always shown separately and labeled, never added to MEASURED. Claude Code only: the estimate pairs PreToolUse with PostToolUse via `tool_use_id`.
 
 `--gains` replaces the default report with a measured-only view: a header
 (commands, input/output tokens, tokens saved, exec time, efficiency meter) and a
@@ -155,12 +156,13 @@ honestly-labeled sections:
 tokens, average reduction (green >= 90%, yellow 50-90%, red < 50% on a
 terminal), total time and an impact bar. It composes with `--since` and
 `--json`, takes `-n/--top N` (default 10) for the table length, and cannot be
-combined with `--verbose`. Rewrites and blocks are shown only as a footer count,
-since they have no measured baseline. With no measured commands in range it
+combined with `--verbose` or `--breakdown`. Measured git rewrites appear as rows
+(e.g. `git`); unmeasured rewrites and blocks are a footer count, followed by the
+ESTIMATED rewrite total on its own line. With no measured commands in range it
 prints `No measured commands yet` and exits 0. `--gains --json` emits
 `{"gains": {"total_commands", "input_tokens", "output_tokens", "tokens_saved",
 "saved_pct", "exec_ms_total", "exec_ms_avg", "by_command": [...], "rewrites",
-"blocked"}}`, where each `by_command` entry has `command`, `count`,
+"blocked", "estimated"}}`, where each `by_command` entry has `command`, `count`,
 `saved_tokens`, `avg_saved_pct` and `avg_ms`.
 
 Each `ctx_guard_run` event records `command` (the program name only, e.g.
@@ -198,6 +200,8 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | `CTX_GUARD_STATS_FILE` | `${XDG_STATE_HOME:-~/.local/state}/ctx-guard/stats.jsonl` | Override the stats log location (wins over `CTX_GUARD_STATE_DIR`) |
 
 If `CTX_GUARD_LOG_DIR` or `CTX_GUARD_STATE_DIR` is not writable -- as happens under an agent sandbox that only permits writes to `$TMPDIR` and the project dir -- `ctx-guard-run` falls back to `$TMPDIR/ctx-guard-<uid>/`. With nowhere writable at all it runs the command uncapped rather than failing it.
+
+Claude Code runs Bash inside a sandbox that can't write the stats file, so measured events from wrapped commands land in that `$TMPDIR` spool. The PostToolUse hook (which runs outside the sandbox) and `ctx-guard-stats` drain spools under `$TMPDIR` and `/tmp/claude*` back into the stats file; set `CTX_GUARD_SPOOL_DIRS` (colon-separated `TMPDIR` roots) to replace that search list. If the stats file can't be written, the spool is left in place and still read.
 | `CTX_GUARD_LOG_RETENTION_DAYS` | 7 | Archived logs older than this are deleted on every run |
 | `CTX_GUARD_REDACT_LOGS` | 1 | Redact common credential patterns before logs reach the model or remain on disk; set to `0` only for an explicitly trusted local workflow |
 | `CTX_GUARD_BARS` | auto | `ctx-guard-stats` bars: `auto` draws them only when stdout is a TTY, `always`/`never` force them on/off |

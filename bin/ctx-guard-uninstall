@@ -12,7 +12,7 @@ from pathlib import Path
 HOME = Path(os.path.expanduser("~"))
 DEST = HOME / ".ctx-guard"
 MANIFEST_PATH = DEST / "install-manifest.json"
-RUN_DIR = Path("/tmp") / f"ctx-guard-{os.getuid()}"
+RUN_DIR = Path(os.environ.get("CTX_GUARD_RUNTIME_ROOT") or f"/tmp/ctx-guard-{os.getuid()}")
 
 
 def sha256(path: Path) -> str:

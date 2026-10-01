@@ -24,6 +24,8 @@ exceptions and exit 0. See pre_bash_rewrite.py's top-level try/except.
 """
 from __future__ import annotations
 
+import glob
+import hashlib
 import json
 import os
 import re
@@ -164,6 +166,120 @@ def build_posttooluse_context(message: str) -> dict:
             "additionalContext": message,
         },
     }
+
+
+def spool_files(dest: str | None = None) -> list[str]:
+    """Stats files written by ctx-guard-run inside a sandbox (Claude Code's Bash
+    sandbox can't write the canonical file, so ctx-guard-run falls back to
+    $TMPDIR/ctx-guard-<uid>/state). Only files owned by us, never `dest`.
+    CTX_GUARD_SPOOL_DIRS (colon-separated TMPDIR roots) replaces the defaults."""
+    uid = os.getuid()
+    if "CTX_GUARD_SPOOL_DIRS" in os.environ:
+        roots = os.environ["CTX_GUARD_SPOOL_DIRS"].split(":")
+    else:
+        roots = [os.environ.get("TMPDIR", "")] + glob.glob("/tmp/claude*")
+    skip = {os.path.realpath(p) for p in (dest or stats_write_path(), LEGACY_STATS_FILE)}
+    found: list[str] = []
+    for root in roots:
+        if not root:
+            continue
+        path = os.path.realpath(os.path.join(root, f"ctx-guard-{uid}", "state", "stats.jsonl"))
+        try:
+            if path in skip or path in found or os.stat(path).st_uid != uid:
+                continue
+        except OSError:
+            continue
+        found.append(path)
+    return found
+
+
+def drain_spools(dest: str | None = None) -> None:
+    """Move spooled events into `dest`. Never raises; on any failure the spool is
+    left (or put back) in place so readers still see it -- events are never lost."""
+    try:
+        dest = dest or stats_write_path()
+        if not _prepare_dir(dest) or (os.path.exists(dest) and not os.access(dest, os.W_OK)):
+            return
+        for spool in spool_files(dest):
+            claimed = f"{spool}.drain-{os.getpid()}"
+            try:
+                os.rename(spool, claimed)  # atomic: concurrent drainers can't both win
+            except OSError:
+                continue
+            try:
+                with open(claimed, "rb") as f:
+                    data = f.read()
+                if data and not data.endswith(b"\n"):
+                    data += b"\n"
+                fd = os.open(dest, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+            except OSError:
+                try:
+                    os.rename(claimed, spool)
+                except OSError:
+                    pass
+                continue
+            try:
+                os.remove(claimed)  # appended already: never put it back
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+# ESTIMATED savings for rewrites whose unbounded form is never run: assumed
+# fraction of output removed by each rule. Assumptions, not measurements;
+# override per rule with a JSON object in $CTX_GUARD_ESTIMATE_RATIOS.
+ESTIMATE_RATIOS = {
+    "git-status": 0.5, "git-log": 0.85, "git-log-args": 0.85, "git-diff": 0.9,
+    "git-show": 0.9, "git-branch-a": 0.3, "grep-unbounded": 0.5,
+    "find-unbounded": 0.5, "cat-large": 0.6, "docker-logs": 0.8,
+    "kubectl-get": 0.3, "kubectl-describe": 0.5, "terraform-plan": 0.6,
+    "pkg-list": 0.6,
+}
+
+
+def estimate_ratio(rule: str) -> float | None:
+    ratios = dict(ESTIMATE_RATIOS)
+    path = os.environ.get("CTX_GUARD_ESTIMATE_RATIOS")
+    if path:
+        try:
+            with open(path) as f:
+                ratios.update({k: float(v) for k, v in json.load(f).items()})
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    r = ratios.get(rule)
+    return r if r is not None and 0 <= r < 1 else None
+
+
+PENDING_DIR = os.path.join(STATE_DIR, "pending")
+PENDING_MAX_AGE_S = 600
+
+
+def pending_key(payload: dict, command: str) -> str:
+    """Correlates a PreToolUse rewrite with its PostToolUse result: tool_use_id
+    when the runtime sends one, else session + original-command hash."""
+    tool_use_id = str(get_field(payload, "tool_use_id", "toolUseId", default="") or "")
+    if SESSION_ID_RE.match(tool_use_id):
+        return tool_use_id
+    digest = hashlib.sha256(command.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{safe_session_id(payload)}-{digest}"
+
+
+def prune_old(directory: str, max_age_s: float) -> None:
+    try:
+        cutoff = time.time() - max_age_s
+        for entry in os.scandir(directory):
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    os.remove(entry.path)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def record_stats_event(kind: str, **fields: Any) -> None:
