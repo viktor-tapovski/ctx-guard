@@ -78,8 +78,10 @@ find "$LOG_DIR" -maxdepth 1 -name 'run-*' -mtime "+${RETENTION_DAYS}" -delete 2>
 # call. Keep the Xs at the very end and match "run-*" for retention instead.
 RAW_LOG="$(mktemp "$LOG_DIR/raw-XXXXXXXX")"
 
+START_MS="$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || echo "")"
 bash "$SCRIPT" >"$RAW_LOG" 2>&1
 STATUS=$?
+END_MS="$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || echo "")"
 
 TOTAL=$(wc -l < "$RAW_LOG")
 ORIG_BYTES=$(wc -c < "$RAW_LOG" | tr -d ' ')
@@ -140,18 +142,67 @@ fi
 chmod 600 "$LOG"
 
 # log_stats <returned_bytes> <compressed:0|1> -- never lets a stats-logging
-# failure affect ctx-guard-run's own exit code.
+# failure affect ctx-guard-run's own exit code. Logs the program name only,
+# never arguments or paths.
 log_stats() {
   local returned_bytes="$1" compressed="$2"
-  python3 - "$STATS_FILE" "$AGENT" "$ORIG_BYTES" "$returned_bytes" "$compressed" "$STATUS" <<'PY' 2>/dev/null || true
-import json, os, sys, time
-stats_file, agent, orig, returned, compressed, status = sys.argv[1:7]
+  python3 - "$STATS_FILE" "$AGENT" "$ORIG_BYTES" "$returned_bytes" "$compressed" "$STATUS" \
+    "$SCRIPT" "$START_MS" "$END_MS" <<'PY' 2>/dev/null || true
+import json, os, re, shlex, sys, time
+stats_file, agent, orig, returned, compressed, status, script, start_ms, end_ms = sys.argv[1:10]
+
+WRAPPERS = {"sudo", "env", "time", "command", "nice"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+NAME = re.compile(r"^[A-Za-z0-9_.+@-]+$")
+
+
+def program_name(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    break
+            else:
+                return "(unknown)"
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = "#"
+        tokens = list(lex)
+    except (OSError, ValueError):
+        return "(unknown)"
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if ASSIGNMENT.match(tok):
+            i += 1
+        elif tok == "cd":
+            while i < len(tokens) and tokens[i] not in ("&&", ";"):
+                i += 1
+            i += 1
+        elif os.path.basename(tok) in WRAPPERS:
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 2 if os.path.basename(tok) == "nice" and tokens[i] == "-n" else 1
+        else:
+            name = os.path.basename(tok)
+            return name if NAME.match(name) else "(unknown)"
+    return "(unknown)"
+
+
+try:
+    duration_ms = max(0, int(end_ms) - int(start_ms))
+except ValueError:
+    duration_ms = 0
+
 os.makedirs(os.path.dirname(stats_file), mode=0o700, exist_ok=True)
 os.chmod(os.path.dirname(stats_file), 0o700)
 event = {
     "ts": time.time(),
     "kind": "ctx_guard_run",
     "agent": agent,
+    "command": program_name(script),
+    "duration_ms": duration_ms,
     "original_bytes": int(orig),
     "returned_bytes": int(returned),
     "compressed": bool(int(compressed)),

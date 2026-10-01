@@ -605,6 +605,96 @@ else
   bad "uninstall did not restore pre-existing agent file"
 fi
 
+# --- ctx-guard-stats --gains -------------------------------------------------
+
+echo "== ctx-guard-stats --gains =="
+
+STATS="$DIR/bin/ctx-guard-stats"
+gains_file="$SCRATCH/gains.jsonl"
+now=$(python3 -c 'import time; print(time.time())')
+python3 - "$gains_file" "$now" <<'PY'
+import json, sys
+path, now = sys.argv[1], float(sys.argv[2])
+rows = [("git", 40000, 4000, 300), ("git", 20000, 20000, 100),
+        ("pnpm", 800000, 4000, 12000), ("pytest", 90000, 30000, 5000), (None, 10000, 5000, 0)]
+with open(path, "w") as f:
+    for cmd, orig, ret, ms in rows:
+        ev = {"ts": now, "kind": "ctx_guard_run", "original_bytes": orig, "returned_bytes": ret}
+        if cmd:
+            ev.update(command=cmd, duration_ms=ms)
+        f.write(json.dumps(ev) + "\n")
+    f.write(json.dumps({"ts": now, "kind": "rewrite", "rule": "git-status"}) + "\n")
+    f.write(json.dumps({"ts": now, "kind": "blocked", "rule": "environment-enumeration"}) + "\n")
+PY
+
+gains_out=$(python3 "$STATS" --stats-file "$gains_file" --gains)
+echo "$gains_out" | grep -q "ctx-guard Token Savings" && echo "$gains_out" | grep -q "By Command" \
+  && ok "--gains prints title and By Command table" || bad "--gains output missing sections -> $gains_out"
+order=$(echo "$gains_out" | grep -E '^ +[0-9]+ ' | awk '{printf "%s ", $2}')
+[ "$order" = "pnpm pytest git (unknown) " ] && ok "--gains sorts by tokens saved, old events under (unknown)" \
+  || bad "--gains row order -> $order"
+echo "$gains_out" | grep -q "rewrites: 1 .* blocked: 1 (not counted above)" \
+  && ok "--gains footer counts rewrites and blocked" || bad "--gains footer missing -> $gains_out"
+echo "$gains_out" | grep -q $'\033' && bad "color leaked into piped --gains" || ok "no color in piped --gains"
+
+gains_json=$(python3 "$STATS" --stats-file "$gains_file" --gains --json)
+python3 - "$gains_json" <<'PY' && ok "--gains --json shape and values" || bad "--gains --json wrong -> $gains_json"
+import json, sys
+g = json.loads(sys.argv[1])["gains"]
+assert g["total_commands"] == 5 and g["rewrites"] == 1 and g["blocked"] == 1
+assert g["tokens_saved"] == g["input_tokens"] - g["output_tokens"]
+assert g["exec_ms_total"] == 17400 and g["exec_ms_avg"] == 3480
+top = g["by_command"][0]
+assert top["command"] == "pnpm" and top["count"] == 1 and top["avg_ms"] == 12000
+assert set(top) == {"command", "count", "saved_tokens", "avg_saved_pct", "avg_ms"}
+git = next(r for r in g["by_command"] if r["command"] == "git")
+assert git["count"] == 2 and git["avg_saved_pct"] == 45.0
+PY
+
+top_json=$(python3 "$STATS" --stats-file "$gains_file" --gains --json -n 2)
+[ "$(echo "$top_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["gains"]["by_command"]))')" = "2" ] \
+  && ok "--gains -n limits json rows" || bad "-n 2 did not limit rows"
+rows_n=$(python3 "$STATS" --stats-file "$gains_file" --gains -n 1 | grep -cE '^ +[0-9]+ ')
+[ "$rows_n" = "1" ] && ok "--gains -n 1 limits table rows" || bad "-n 1 gave $rows_n rows"
+
+since_json=$(python3 "$STATS" --stats-file "$gains_file" --gains --json --since 1h)
+[ "$(echo "$since_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["gains"]["total_commands"])')" = "5" ] \
+  && ok "--gains composes with --since" || bad "--gains --since broke -> $since_json"
+
+empty_out=$(python3 "$STATS" --stats-file "$obs_file" --gains); empty_rc=$?
+echo "$empty_out" | grep -q "No measured commands yet" && [ "$empty_rc" = "0" ] \
+  && ok "--gains empty state exits 0" || bad "--gains empty state wrong (rc=$empty_rc) -> $empty_out"
+
+python3 "$STATS" --stats-file "$gains_file" --gains --verbose >/dev/null 2>&1 \
+  && bad "--gains --verbose should be rejected" || ok "--gains conflicts with --verbose"
+python3 "$STATS" --stats-file "$gains_file" --gains --breakdown >/dev/null 2>&1 \
+  && bad "--gains --breakdown should be rejected" || ok "--gains conflicts with --breakdown"
+
+# Command extraction: program name only, arguments and paths never logged.
+cmd_stats="$SCRATCH/cmd-stats.jsonl"
+run_cmd() {
+  local script="$SCRATCH/cmd-script.sh"
+  printf '#!/usr/bin/env bash\n%s\n' "$1" > "$script"
+  CTX_GUARD_STATS_FILE="$cmd_stats" "$CTX_GUARD_RUN" "$script" >/dev/null 2>&1
+}
+last_command() { tail -n 1 "$cmd_stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command"])'; }
+
+run_cmd 'cd /tmp && git --version | head -1'
+[ "$(last_command)" = "git" ] && ok "command extraction skips cd <dir> &&" || bad "cd && -> $(last_command)"
+run_cmd 'FOO=1 sudo -n true --secret-arg=hunter2'
+[ "$(last_command)" = "true" ] && ok "command extraction skips VAR=value and sudo" || bad "FOO=1 sudo -> $(last_command)"
+run_cmd '/usr/bin/env echo hi'
+[ "$(last_command)" = "echo" ] && ok "command extraction takes the basename" || bad "basename -> $(last_command)"
+run_cmd '(echo "unterminated'
+[ "$(last_command)" = "(unknown)" ] && ok "unparseable command logs (unknown)" || bad "unparseable -> $(last_command)"
+grep -qE 'hunter2|--version|/usr/bin|/tmp' "$cmd_stats" && bad "arguments or paths leaked into stats" \
+  || ok "no arguments or paths in stats events"
+python3 - "$cmd_stats" <<'PY' && ok "events carry integer duration_ms" || bad "duration_ms missing or not an int"
+import json, sys
+evs = [json.loads(l) for l in open(sys.argv[1])]
+assert evs and all(isinstance(e["duration_ms"], int) and e["duration_ms"] >= 0 for e in evs)
+PY
+
 echo
 echo "== summary: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
