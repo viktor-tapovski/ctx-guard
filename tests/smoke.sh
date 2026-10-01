@@ -202,6 +202,30 @@ echo 'echo hello' > "$SMALL"
 out=$(CTX_GUARD_AGENT=claude-code "$CTX_GUARD_RUN" "$SMALL")
 [ "$out" = "hello" ] && ok "small output passed through untouched" || bad "small output -> $out"
 
+wrapped=$(rewrite_claude "printf 'a\n'; printf 'b\n'")
+: > "$CTX_GUARD_STATS_FILE"
+(unset CTX_GUARD_AGENT; eval "$wrapped" >/dev/null)
+logged_agent=$(python3 -c '
+import json, sys
+events = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print([e["agent"] for e in events if e["kind"] == "ctx_guard_run"][-1])
+' "$CTX_GUARD_STATS_FILE")
+[ "$logged_agent" = "claude-code" ] && ok "wrapped command logs the hook's agent, not unknown" || bad "wrapped command logged agent '$logged_agent'"
+
+SAVINGS_REPO="$SCRATCH/savings-repo"
+git init -q "$SAVINGS_REPO"
+for i in $(seq 1 40); do
+  git -C "$SAVINGS_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "commit number $i with a reasonably long message body"
+done
+: > "$CTX_GUARD_STATS_FILE"
+(cd "$SAVINGS_REPO" && rewrite_claude "git log" >/dev/null)
+rewrite_saved=$(python3 -c '
+import json, sys
+events = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print([e.get("saved_bytes", 0) for e in events if e["kind"] == "rewrite"][-1])
+' "$CTX_GUARD_STATS_FILE")
+[ "$rewrite_saved" -gt 0 ] 2>/dev/null && ok "read-only rewrite records measured saved_bytes ($rewrite_saved)" || bad "rewrite saved_bytes -> '$rewrite_saved'"
+
 SECRET="$SCRATCH/secret.sh"
 {
   echo '#!/usr/bin/env bash'
@@ -272,6 +296,63 @@ out=$(CTX_GUARD_LOG_DIR="$RO/logs" CTX_GUARD_STATE_DIR="$RO/state" \
 [ "$out" = "passthrough-ok" ] && ok "no writable dir anywhere: command still runs" \
   || bad "no writable dir anywhere -> $out"
 chmod 700 "$RO"
+
+# --- default stats location (persistent XDG state dir) ---------------------
+# HOME/XDG_STATE_HOME/TMPDIR always point into $SCRATCH: never the real ~/.local/state.
+SL="$SCRATCH/sl"; mkdir -p "$SL/tmp"
+SLS="$SL/run.sh"; echo 'echo sl-ok' > "$SLS"
+sl_run() { # sl_run <extra env assignments...>; clears all stats overrides
+  echo 'echo sl-ok' > "$SLS"  # ctx-guard-run deletes its script after each run
+  env -u CTX_GUARD_STATE_DIR -u CTX_GUARD_STATS_FILE -u XDG_STATE_HOME \
+      CTX_GUARD_LOG_DIR="$SL/logs" TMPDIR="$SL/tmp" HOME="$SL/home" "$@" \
+      "$CTX_GUARD_RUN" "$SLS" 2>/dev/null
+}
+sl_py() { # sl_py <extra env...> -- print STATS_FILE and write one event via hooks lib
+  env -u CTX_GUARD_STATE_DIR -u CTX_GUARD_STATS_FILE -u XDG_STATE_HOME \
+      TMPDIR="$SL/tmp" HOME="$SL/home" "$@" python3 -c '
+import sys; sys.path.insert(0, sys.argv[1] + "/hooks/lib")
+import ctx_guard_common as c
+c.record_stats_event("t"); print(c.stats_write_path())' "$DIR"
+}
+
+mkdir -p "$SL/home"
+out=$(sl_run); [ "$out" = "sl-ok" ] && ok "default stats: command output intact" || bad "default stats -> $out"
+[ -f "$SL/home/.local/state/ctx-guard/stats.jsonl" ] && ok "default stats under \$HOME/.local/state/ctx-guard" \
+  || bad "default stats not under \$HOME/.local/state/ctx-guard"
+[ "$(mode_of "$SL/home/.local/state/ctx-guard")" = "700" ] && ok "persistent stats dir mode 700" || bad "persistent stats dir mode"
+[ "$(mode_of "$SL/home/.local/state/ctx-guard/stats.jsonl")" = "600" ] && ok "persistent stats file mode 600" || bad "persistent stats file mode"
+
+sl_run XDG_STATE_HOME="$SL/xdg" >/dev/null
+[ -f "$SL/xdg/ctx-guard/stats.jsonl" ] && ok "XDG_STATE_HOME honored" || bad "XDG_STATE_HOME ignored"
+
+sl_run XDG_STATE_HOME="$SL/xdg" CTX_GUARD_STATE_DIR="$SL/sd" >/dev/null
+[ -f "$SL/sd/stats.jsonl" ] && ok "CTX_GUARD_STATE_DIR beats XDG default" || bad "STATE_DIR precedence"
+sl_run XDG_STATE_HOME="$SL/xdg" CTX_GUARD_STATE_DIR="$SL/sd2" CTX_GUARD_STATS_FILE="$SL/explicit/s.jsonl" >/dev/null
+[ -f "$SL/explicit/s.jsonl" ] && [ ! -e "$SL/sd2/stats.jsonl" ] && ok "CTX_GUARD_STATS_FILE beats STATE_DIR" || bad "STATS_FILE precedence"
+
+# hooks lib: same rules
+p=$(sl_py)
+[ "$p" = "$SL/home/.local/state/ctx-guard/stats.jsonl" ] && ok "hooks lib default matches run" || bad "hooks lib default -> $p"
+p=$(sl_py XDG_STATE_HOME="$SL/xdg2")
+[ "$p" = "$SL/xdg2/ctx-guard/stats.jsonl" ] && [ -f "$p" ] && ok "hooks lib honors XDG_STATE_HOME" || bad "hooks lib XDG -> $p"
+p=$(sl_py CTX_GUARD_STATE_DIR="$SL/sd3")
+[ "$p" = "$SL/sd3/stats.jsonl" ] && ok "hooks lib STATE_DIR override" || bad "hooks lib STATE_DIR -> $p"
+p=$(sl_py CTX_GUARD_STATE_DIR="$SL/sd3" CTX_GUARD_STATS_FILE="$SL/e2/s.jsonl")
+[ "$p" = "$SL/e2/s.jsonl" ] && [ -f "$p" ] && ok "hooks lib STATS_FILE override" || bad "hooks lib STATS_FILE -> $p"
+
+# ctx-guard-stats reads the same default
+out=$(env -u CTX_GUARD_STATE_DIR -u CTX_GUARD_STATS_FILE -u XDG_STATE_HOME HOME="$SL/home" \
+      python3 "$DIR/bin/ctx-guard-stats" --json)
+echo "$out" | grep -q '"events": [1-9]' && ok "ctx-guard-stats reads default location" || bad "stats default read"
+
+# fallback: unwritable persistent dir -> legacy runtime root (/tmp/ctx-guard-<uid>;
+# CTX_GUARD_RUNTIME_ROOT redirects it so tests never touch the real one).
+RO2="$SCRATCH/ro2"; mkdir -p "$RO2"; chmod 500 "$RO2"
+out=$(sl_run HOME="$RO2/home" CTX_GUARD_RUNTIME_ROOT="$SL/rt1"); [ "$out" = "sl-ok" ] && ok "unwritable persistent stats dir: command still runs" || bad "persistent fallback -> $out"
+[ -f "$SL/rt1/state/stats.jsonl" ] && ok "run falls back to legacy runtime state dir" || bad "run legacy fallback missing"
+p=$(sl_py HOME="$RO2/home" CTX_GUARD_RUNTIME_ROOT="$SL/rt2")
+[ "$p" = "$SL/rt2/state/stats.jsonl" ] && [ -f "$p" ] && ok "hooks lib falls back to legacy runtime state dir" || bad "hooks lib fallback -> $p"
+chmod 700 "$RO2"
 
 # --- stats.jsonl (written by ctx-guard-run above) --------------------------
 
@@ -382,6 +463,70 @@ echo "$obs_out" | grep -q "1 rewrite  " \
 echo "$obs_out" | grep -qE "[0-9]%" \
   && bad "gauge invented a percentage with no measured data -> $obs_out" \
   || ok "gauge shows no percentage without measured data"
+
+# Per-agent savings: rewrite saved_bytes count toward the headline and each
+# agent gets its own saved bytes/tokens.
+agent_file="$SCRATCH/per-agent.jsonl"
+printf '%s\n' \
+  '{"ts":1,"agent":"claude-code","kind":"ctx_guard_run","original_bytes":10000,"returned_bytes":2000,"compressed":true}' \
+  '{"ts":2,"agent":"claude-code","kind":"rewrite","rule":"git-log","saved_bytes":4000}' \
+  '{"ts":3,"agent":"copilot-cli","kind":"rewrite","rule":"git-diff","saved_bytes":8000}' > "$agent_file"
+agent_json=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$agent_file" --json)
+echo "$agent_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["measured"]["saved_bytes"] == 20000, d["measured"]
+a = d["by_agent"]
+assert a["claude-code"] == {"saved_bytes": 12000, "saved_tokens_est": 3000}, a
+assert a["copilot-cli"] == {"saved_bytes": 8000, "saved_tokens_est": 2000}, a
+' && ok "stats --json attributes rewrite+run savings per agent" \
+  || bad "by_agent savings wrong -> $agent_json"
+agent_gauge=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$agent_file")
+echo "$agent_gauge" | grep -q "claude-code" && echo "$agent_gauge" | grep -q "copilot-cli" \
+  && ok "gauge lists each agent's savings" \
+  || bad "gauge missing per-agent savings -> $agent_gauge"
+
+# --breakdown: fixture spans 2 days, 2 ISO weeks (01-26 -> 02-01, 02-02 -> 02-08)
+# and 2 months. ts values are 12:00 UTC on 2026-01-30 and 2026-02-02.
+bd_file="$SCRATCH/breakdown.jsonl"
+printf '%s\n' \
+  '{"ts":1769774400,"agent":"claude-code","kind":"ctx_guard_run","original_bytes":40000,"returned_bytes":4000,"compressed":true}' \
+  '{"ts":1769774401,"agent":"claude-code","kind":"ctx_guard_run","original_bytes":8000,"returned_bytes":8000,"compressed":false}' \
+  '{"ts":1770033600,"agent":"claude-code","kind":"ctx_guard_run","original_bytes":8000,"returned_bytes":2000,"compressed":true}' \
+  '{"ts":1770033601,"agent":"claude-code","kind":"rewrite","rule":"git-log","saved_bytes":4000}' \
+  '{"ts":1770033602,"agent":"claude-code","kind":"tool_output","tool_name":"Bash","result_bytes":999}' > "$bd_file"
+bd() { python3 "$DIR/bin/ctx-guard-stats" --stats-file "$bd_file" "$@"; }
+bd_all=$(bd --breakdown)
+for hdr in "Daily Breakdown" "Weekly Breakdown" "Monthly Breakdown"; do
+  echo "$bd_all" | grep -q "$hdr" && ok "--breakdown prints $hdr" || bad "--breakdown missing $hdr -> $bd_all"
+done
+echo "$bd_all" | grep -q "01-26 → 02-01" && echo "$bd_all" | grep -q "02-02 → 02-08" \
+  && ok "--breakdown weekly rows show Mon→Sun ranges" || bad "weekly ranges wrong -> $bd_all"
+echo "$bd_all" | grep -qE "^(2026-01-30|2026-02-02) " \
+  && ok "--breakdown daily rows present" || bad "daily rows missing -> $bd_all"
+[ "$(echo "$bd_all" | grep -c '^TOTAL')" = "3" ] \
+  && ok "--breakdown all prints a TOTAL row per section" || bad "expected 3 TOTAL rows -> $bd_all"
+bd_daily=$(bd --breakdown daily)
+[ "$(echo "$bd_daily" | grep -cE '^2026-')" = "2" ] && ! echo "$bd_daily" | grep -q "Weekly" \
+  && ok "--breakdown daily shows 2 day rows only" || bad "daily breakdown wrong -> $bd_daily"
+echo "$bd_daily" | grep '^TOTAL' | grep -qE "3 +14\.0K +3\.5K +11\.5K +[0-9.]+%" \
+  && ok "--breakdown TOTAL cmds/input/output/saved in tokens" || bad "TOTAL row wrong -> $bd_daily"
+echo "$bd_daily" | grep -q $'\033' && bad "colour leaked into piped breakdown" || ok "no colour in piped breakdown"
+CTX_GUARD_BARS=always bd --breakdown daily | grep -q $'\033' \
+  && ok "Save% coloured when CTX_GUARD_BARS=always" || bad "no colour with CTX_GUARD_BARS=always"
+bd_json=$(bd --breakdown --json)
+echo "$bd_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert len(d["daily"]) == 2 and len(d["weekly"]) == 2 and len(d["monthly"]) == 2, d
+assert d["totals"]["commands"] == 3, d["totals"]
+assert d["totals"]["original_bytes"] == 56000 and d["totals"]["returned_bytes"] == 14000, d["totals"]
+assert d["totals"]["saved_bytes"] == 46000, d["totals"]
+assert sum(g["saved_bytes"] for g in d["daily"]) == 46000, d["daily"]
+' && ok "--breakdown --json valid with groups and totals" || bad "breakdown json wrong -> $bd_json"
+bd_since=$(bd --breakdown --since 1d)
+echo "$bd_since" | grep -q "2026-01-30" \
+  && bad "--since did not filter breakdown -> $bd_since" || ok "--since filters breakdown data"
 
 # --- context_monitor.py: Claude Code context-window thresholds ------------
 

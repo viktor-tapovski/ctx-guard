@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
 
 def ctx_guard_version() -> str:
@@ -41,12 +42,26 @@ def ctx_guard_version() -> str:
         return "unknown"
 
 
-STATE_DIR = os.environ.get(
-    "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"
-)
-DEFAULT_STATS_FILE = os.environ.get(
-    "CTX_GUARD_STATS_FILE", os.path.join(STATE_DIR, "stats.jsonl")
-)
+def _default_stats_file() -> str:
+    # Same rule as ctx-guard-run and hooks/lib: STATS_FILE > STATE_DIR > XDG default.
+    if os.environ.get("CTX_GUARD_STATS_FILE"):
+        return os.environ["CTX_GUARD_STATS_FILE"]
+    if os.environ.get("CTX_GUARD_STATE_DIR"):
+        return os.path.join(os.environ["CTX_GUARD_STATE_DIR"], "stats.jsonl")
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    path = os.path.join(base, "ctx-guard", "stats.jsonl")
+    legacy = os.path.join(
+        os.environ.get("CTX_GUARD_RUNTIME_ROOT") or f"/tmp/ctx-guard-{os.getuid()}",
+        "state",
+        "stats.jsonl",
+    )
+    # Writers fall back to the legacy path when the persistent dir is unwritable.
+    return legacy if not os.path.exists(path) and os.path.exists(legacy) else path
+
+
+DEFAULT_STATS_FILE = _default_stats_file()
 
 
 def load_events(path: str, since_ts: float | None) -> list[dict]:
@@ -84,6 +99,8 @@ def fmt_tokens(n: float) -> str:
     return f"{n:.0f}"
 
 
+BREAKDOWN_TITLES = {"daily": ("Daily", "Date"), "weekly": ("Weekly", "Week"),
+                    "monthly": ("Monthly", "Month")}
 BAR_WIDTH = 24
 LABEL_WIDTH = 20
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8 of a cell; a full cell is █
@@ -139,7 +156,7 @@ def print_gauge(summary: dict) -> None:
     bars = bars_enabled()
     sep = "  ·  " if bars and unicode_ok() else "  -  "
 
-    if not measured["commands_wrapped"]:
+    if not measured["commands_wrapped"] and not measured["saved_bytes"]:
         # Nothing was wrapped, so no before/after pair exists and there is no
         # honest ratio to print. Report the observed volume instead of a bare
         # event count -- same MEASURED/OBSERVED split the full report makes.
@@ -160,16 +177,101 @@ def print_gauge(summary: dict) -> None:
         return
 
     pct = measured["compression_ratio_pct"]
-    bar = f"{render_bar(pct, 100)} " if bars else ""
-    head = f"{pct}%" if bars else f"{pct}% reduction"
+    if measured["commands_wrapped"]:
+        bar = f"{render_bar(pct, 100)} " if bars else ""
+        head = f"{pct}%" if bars else f"{pct}% reduction"
+    else:
+        bar, head = "", "rewrites only"
     tail = ""
+    for agent, info in sorted(summary["by_agent"].items()):
+        if info["saved_bytes"]:
+            tail += f"{sep}{agent} {fmt_bytes(info['saved_bytes'])}"
     if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
-        tail = (f"{sep}pkg-guard: {summary['pkg_blocked_count']} blocked, "
-                f"{summary['pkg_warned_count']} warned")
+        tail += (f"{sep}pkg-guard: {summary['pkg_blocked_count']} blocked, "
+                 f"{summary['pkg_warned_count']} warned")
     print(f"ctx-guard  {bar}{head}"
           f"{sep}{fmt_bytes(measured['saved_bytes'])} saved"
           f"{sep}~{fmt_tokens(measured['saved_tokens_est'])} tokens"
           f"{tail}")
+
+
+def bucket_keys(ts: float) -> dict[str, tuple[str, str]]:
+    """(sort key, label) per granularity for an event timestamp, in UTC."""
+    d = datetime.fromtimestamp(ts, timezone.utc).date()
+    mon = d - timedelta(days=d.weekday())
+    sun = mon + timedelta(days=6)
+    return {
+        "daily": (d.isoformat(), d.isoformat()),
+        "weekly": (mon.isoformat(), f"{mon:%m-%d} → {sun:%m-%d}"),
+        "monthly": (f"{d:%Y-%m}", f"{d:%Y-%m}"),
+    }
+
+
+def build_breakdown(events: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, dict] = {g: {} for g in BREAKDOWN_TITLES}
+    for e in events:
+        kind = e.get("kind")
+        if kind not in ("ctx_guard_run", "rewrite"):
+            continue
+        orig = ret = 0
+        if kind == "ctx_guard_run":
+            orig, ret = e.get("original_bytes", 0), e.get("returned_bytes", 0)
+            saved = orig - ret
+        else:
+            saved = e.get("saved_bytes", 0)
+        for gran, (key, label) in bucket_keys(e.get("ts", 0)).items():
+            row = groups[gran].setdefault(key, {
+                "label": label, "commands": 0, "original_bytes": 0,
+                "returned_bytes": 0, "saved_bytes": 0})
+            row["commands"] += kind == "ctx_guard_run"
+            row["original_bytes"] += orig
+            row["returned_bytes"] += ret
+            row["saved_bytes"] += saved
+    out = {}
+    for gran, rows in groups.items():
+        out[gran] = [rows[k] for k in sorted(rows)]
+        for r in out[gran]:
+            r["saved_pct"] = (round(100 * r["saved_bytes"] / r["original_bytes"], 1)
+                              if r["original_bytes"] else 0.0)
+    return out
+
+
+def breakdown_totals(rows: list[dict]) -> dict:
+    t = {k: sum(r[k] for r in rows)
+         for k in ("commands", "original_bytes", "returned_bytes", "saved_bytes")}
+    t["saved_pct"] = (round(100 * t["saved_bytes"] / t["original_bytes"], 1)
+                      if t["original_bytes"] else 0.0)
+    return t
+
+
+def print_breakdown(title: str, header: str, rows: list[dict]) -> None:
+    color = bars_enabled()
+    lw = max([len(header), 5] + [len(r["label"]) for r in rows])
+    widths = (5, 12, 12, 12, 6)
+    cols = ("Cmds", "Input (tok)", "Output (tok)", "Saved (tok)", "Save%")
+
+    def line(label: str, r: dict) -> str:
+        cells = (str(r["commands"]), fmt_tokens(r["original_bytes"] / 4),
+                 fmt_tokens(r["returned_bytes"] / 4), fmt_tokens(r["saved_bytes"] / 4))
+        pct = f"{r['saved_pct']:.1f}%"
+        pct_cell = f"{pct:>{widths[4]}}"
+        if color:
+            pct_cell = f"\033[32m{pct_cell}\033[0m"
+        return (f"{label:{lw}s}  "
+                + "  ".join(f"{c:>{w}}" for c, w in zip(cells, widths)) + f"  {pct_cell}")
+
+    head = (f"{header:{lw}s}  "
+            + "  ".join(f"{c:>{w}}" for c, w in zip(cols, widths)))
+    rule = "─" * len(head) if unicode_ok() else "-" * len(head)
+    print(f"{title} Breakdown:")
+    print(rule)
+    print(head)
+    print(rule)
+    for r in rows:
+        print(line(r["label"], r))
+    print(rule)
+    print(line("TOTAL", breakdown_totals(rows)))
+    print()
 
 
 def main() -> None:
@@ -182,6 +284,9 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON summary")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="print the full MEASURED/OBSERVED report instead of the one-line gauge")
+    parser.add_argument("--breakdown", nargs="?", const="all", default=None,
+                        choices=["daily", "weekly", "monthly", "all"],
+                        help="per-day/week/month table of commands, tokens and savings")
     parser.add_argument("--reset", action="store_true", help="delete the stats file and exit")
     args = parser.parse_args()
 
@@ -217,6 +322,18 @@ def main() -> None:
             print("Stats accumulate as ctx-guard rewrites commands or wraps verbose output.")
         return
 
+    if args.breakdown:
+        grans = list(BREAKDOWN_TITLES) if args.breakdown == "all" else [args.breakdown]
+        data = build_breakdown(events)
+        if args.json:
+            out = {g: data[g] for g in grans}
+            out["totals"] = breakdown_totals(data[grans[0]])
+            print(json.dumps(out, indent=2))
+            return
+        for g in grans:
+            print_breakdown(*BREAKDOWN_TITLES[g], data[g])
+        return
+
     by_agent = defaultdict(list)
     for ev in events:
         by_agent[ev.get("agent", "unknown")].append(ev)
@@ -226,11 +343,20 @@ def main() -> None:
     compressed = [e for e in run_events if e.get("compressed")]
     total_orig = sum(e.get("original_bytes", 0) for e in run_events)
     total_returned = sum(e.get("returned_bytes", 0) for e in run_events)
-    saved_bytes = max(0, total_orig - total_returned)
+    run_saved = max(0, total_orig - total_returned)
+
+    # --- MEASURED: read-only rewrites that recorded before/after bytes ---
+    rewrite_events = [e for e in events if e.get("kind") == "rewrite"]
+    rewrite_saved = sum(e.get("saved_bytes", 0) for e in rewrite_events)
+    saved_bytes = run_saved + rewrite_saved
     saved_tokens = saved_bytes / 4
 
-    # --- OBSERVED: rewrites ---
-    rewrite_events = [e for e in events if e.get("kind") == "rewrite"]
+    saved_by_agent = defaultdict(int)
+    for e in run_events:
+        saved_by_agent[e.get("agent", "unknown")] += max(
+            0, e.get("original_bytes", 0) - e.get("returned_bytes", 0))
+    for e in rewrite_events:
+        saved_by_agent[e.get("agent", "unknown")] += e.get("saved_bytes", 0)
     rewrite_by_rule = Counter(e.get("rule", "unknown") for e in rewrite_events)
 
     # --- OBSERVED: raw tool output volume delivered to the model ---
@@ -254,7 +380,11 @@ def main() -> None:
             "returned_bytes": total_returned,
             "saved_bytes": saved_bytes,
             "saved_tokens_est": round(saved_tokens),
-            "compression_ratio_pct": round(100 * saved_bytes / total_orig, 1) if total_orig else 0.0,
+            "compression_ratio_pct": round(100 * run_saved / total_orig, 1) if total_orig else 0.0,
+        },
+        "by_agent": {
+            a: {"saved_bytes": b, "saved_tokens_est": round(b / 4)}
+            for a, b in saved_by_agent.items()
         },
         "observed": {
             "rewrites_by_rule": dict(rewrite_by_rule),

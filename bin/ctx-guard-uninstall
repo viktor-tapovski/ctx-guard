@@ -172,6 +172,11 @@ def main() -> None:
             shutil.rmtree(RUN_DIR)
         print(f"Removed runtime dir {RUN_DIR}")
 
+    xdg = os.environ.get("XDG_STATE_HOME") or str(HOME / ".local" / "state")
+    persistent = Path(xdg) / "ctx-guard" / "stats.jsonl"
+    if persistent.exists():
+        print(f"Kept persistent stats {persistent} (delete it manually or run ctx-guard-stats --reset first).")
+
     print("Done. Restart Claude Code and Copilot CLI to pick up the changes.")
 
 
