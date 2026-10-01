@@ -122,6 +122,7 @@ Check whether ctx-guard is actually saving tokens — don't take it on faith:
 ctx-guard-stats            # one-line savings gauge
 ctx-guard-stats --verbose  # full MEASURED/OBSERVED report
 ctx-guard-stats --json     # machine-readable
+ctx-guard-stats --gains    # measured savings per command (add -n N for top N rows)
 ctx-guard-stats --since 7d # last 7 days only
 ctx-guard-stats --breakdown [daily|weekly|monthly]  # per-period table (bare = all)
 ctx-guard-stats --reset    # clear the log
@@ -147,6 +148,26 @@ honestly-labeled sections:
 
 - **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
 - **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`) and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof.
+
+`--gains` replaces the default report with a measured-only view: a header
+(commands, input/output tokens, tokens saved, exec time, efficiency meter) and a
+**By Command** table sorted by tokens saved, with per-command count, saved
+tokens, average reduction (green >= 90%, yellow 50-90%, red < 50% on a
+terminal), total time and an impact bar. It composes with `--since` and
+`--json`, takes `-n/--top N` (default 10) for the table length, and cannot be
+combined with `--verbose`. Rewrites and blocks are shown only as a footer count,
+since they have no measured baseline. With no measured commands in range it
+prints `No measured commands yet` and exits 0. `--gains --json` emits
+`{"gains": {"total_commands", "input_tokens", "output_tokens", "tokens_saved",
+"saved_pct", "exec_ms_total", "exec_ms_avg", "by_command": [...], "rewrites",
+"blocked"}}`, where each `by_command` entry has `command`, `count`,
+`saved_tokens`, `avg_saved_pct` and `avg_ms`.
+
+Each `ctx_guard_run` event records `command` (the program name only, e.g.
+`git`; leading `VAR=value`, `sudo`/`env`/`time`/`command`/`nice` and `cd <dir> &&`
+are skipped, and `(unknown)` is logged if it cannot be parsed) and
+`duration_ms`. Arguments and paths are never logged. Events written by older
+versions have neither field and group under `(unknown)` with zero time.
 
 All stats are per-agent (`claude-code` / `copilot-cli`), recorded to `${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard/stats.jsonl` (persistent across reboots; dir mode `700`), one JSON object per line, mode `600`. If that dir is not writable, writers fall back to `/tmp/ctx-guard-<uid>/state/stats.jsonl`. `ctx-guard-uninstall` leaves this file in place.
 

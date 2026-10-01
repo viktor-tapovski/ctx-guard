@@ -18,6 +18,9 @@ Two kinds of numbers are reported, and they are NOT conflated:
               observed sizes are shown.
 
 Token estimates use the same bytes/4 heuristic ctx-guard uses elsewhere.
+
+--gains is a separate view over MEASURED events only, grouped by the program
+name ctx-guard-run logs with each event (never its arguments or paths).
 """
 from __future__ import annotations
 
@@ -274,6 +277,115 @@ def print_breakdown(title: str, header: str, rows: list[dict]) -> None:
     print()
 
 
+def fmt_ms(ms: float) -> str:
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    if ms < 60_000:
+        return f"{ms / 1000:.1f}s"
+    minutes, seconds = divmod(round(ms / 1000), 60)
+    return f"{minutes}m{seconds:02d}s"
+
+
+def gains_summary(events: list[dict], top: int) -> dict:
+    """The --gains view: MEASURED events only, grouped by program name.
+    Events from before `command` was logged group under (unknown)."""
+    runs = [e for e in events if e.get("kind") == "ctx_guard_run"]
+    total_orig = sum(e.get("original_bytes", 0) for e in runs)
+    total_returned = sum(e.get("returned_bytes", 0) for e in runs)
+    saved_bytes = max(0, total_orig - total_returned)
+    exec_ms = sum(e.get("duration_ms", 0) for e in runs)
+
+    groups = defaultdict(list)
+    for e in runs:
+        groups[e.get("command") or "(unknown)"].append(e)
+    rows = []
+    for name, evs in groups.items():
+        orig = sum(e.get("original_bytes", 0) for e in evs)
+        ret = sum(e.get("returned_bytes", 0) for e in evs)
+        pcts = [100 * max(0, e.get("original_bytes", 0) - e.get("returned_bytes", 0))
+                / e["original_bytes"] if e.get("original_bytes") else 0.0 for e in evs]
+        rows.append({
+            "command": name,
+            "count": len(evs),
+            "saved_tokens": round(max(0, orig - ret) / 4),
+            "avg_saved_pct": round(sum(pcts) / len(pcts), 1),
+            "avg_ms": round(sum(e.get("duration_ms", 0) for e in evs) / len(evs)),
+            "total_ms": sum(e.get("duration_ms", 0) for e in evs),
+        })
+    rows.sort(key=lambda r: (-r["saved_tokens"], r["command"]))
+
+    return {
+        "total_commands": len(runs),
+        "input_tokens": round(total_orig / 4),
+        "output_tokens": round(total_returned / 4),
+        "tokens_saved": round(saved_bytes / 4),
+        "saved_pct": round(100 * saved_bytes / total_orig, 1) if total_orig else 0.0,
+        "exec_ms_total": exec_ms,
+        "exec_ms_avg": round(exec_ms / len(runs)) if runs else 0,
+        "by_command": rows[:top],
+        "rewrites": sum(1 for e in events if e.get("kind") == "rewrite"),
+        "blocked": sum(1 for e in events if e.get("kind") == "blocked"),
+    }
+
+
+def color_enabled() -> bool:
+    return bars_enabled() and "NO_COLOR" not in os.environ
+
+
+def paint(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if color_enabled() else text
+
+
+def print_gains(g: dict) -> None:
+    if not g["total_commands"]:
+        print("No measured commands yet")
+        print("Run commands through ctx-guard-run, or widen --since.")
+        return
+
+    uni = unicode_ok()
+    heavy, light = ("═", "─") if uni else ("=", "-")
+    bars = bars_enabled()
+    title = "ctx-guard Token Savings"
+    print(title)
+    print(heavy * len(title))
+    meter = f"{render_bar(g['saved_pct'], 100)} " if bars else ""
+    fields = [
+        ("Total commands", str(g["total_commands"])),
+        ("Input tokens", fmt_tokens(g["input_tokens"])),
+        ("Output tokens", fmt_tokens(g["output_tokens"])),
+        ("Tokens saved", f"{fmt_tokens(g['tokens_saved'])} ({g['saved_pct']}%)"),
+        ("Total exec time", f"{fmt_ms(g['exec_ms_total'])} (avg {fmt_ms(g['exec_ms_avg'])})"),
+        ("Efficiency meter", f"{meter}{g['saved_pct']}%"),
+    ]
+    for label, value in fields:
+        print(f"{label + ':':18s}{value}")
+    print()
+
+    heading = "By Command"
+    print(heading)
+    print(light * len(heading))
+    rows = g["by_command"]
+    name_w = max([len("Command")] + [len(r["command"]) for r in rows])
+    header = f"{'#':>3}  {'Command':{name_w}s}  {'Count':>5}  {'Saved':>7}  {'Avg%':>6}  {'Time':>7}"
+    if bars:
+        header += "  Impact"
+    print(header)
+    print(light * (len(header) + (4 if bars else 0)))
+    top_saved = max((r["saved_tokens"] for r in rows), default=0)
+    for i, r in enumerate(rows, 1):
+        pct = r["avg_saved_pct"]
+        code = "32" if pct >= 90 else "33" if pct >= 50 else "31"
+        pct_cell = paint(f"{pct:>5.1f}%", code)
+        line = (f"{i:>3}  {r['command']:{name_w}s}  {r['count']:>5}  "
+                f"{fmt_tokens(r['saved_tokens']):>7}  {pct_cell}  {fmt_ms(r['total_ms']):>7}")
+        if bars:
+            line += f"  {render_bar(r['saved_tokens'], top_saved, 8)}"
+        print(line)
+    print()
+    dot = "·" if uni else "-"
+    print(paint(f"rewrites: {g['rewrites']} {dot} blocked: {g['blocked']} (not counted above)", "2"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize ctx-guard stats.jsonl")
     parser.add_argument("--version", action="version",
@@ -287,8 +399,16 @@ def main() -> None:
     parser.add_argument("--breakdown", nargs="?", const="all", default=None,
                         choices=["daily", "weekly", "monthly", "all"],
                         help="per-day/week/month table of commands, tokens and savings")
+    parser.add_argument("--gains", action="store_true",
+                        help="show measured token savings per command instead of the default report")
+    parser.add_argument("-n", "--top", type=int, default=10, metavar="N",
+                        help="rows in the --gains By Command table (default 10)")
     parser.add_argument("--reset", action="store_true", help="delete the stats file and exit")
     args = parser.parse_args()
+    if args.gains and (args.verbose or args.breakdown):
+        parser.error("--gains cannot be combined with --verbose or --breakdown")
+    if args.top < 1:
+        parser.error("--top must be at least 1")
 
     if args.reset:
         if os.path.isfile(args.stats_file):
@@ -313,6 +433,16 @@ def main() -> None:
         since_ts = time.time() - amount * seconds
 
     events = load_events(args.stats_file, since_ts)
+
+    if args.gains:
+        gains = gains_summary(events, args.top)
+        if args.json:
+            for row in gains["by_command"]:
+                del row["total_ms"]
+            print(json.dumps({"gains": gains}, indent=2))
+        else:
+            print_gains(gains)
+        return
 
     if not events:
         if args.json:
