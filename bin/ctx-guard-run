@@ -174,7 +174,7 @@ def program_name(path):
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if ASSIGNMENT.match(tok):
+        if ASSIGNMENT.match(tok) or tok in (";", "&&", "||", "&"):
             i += 1
         elif tok == "cd":
             while i < len(tokens) and tokens[i] not in ("&&", ";"):
