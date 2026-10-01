@@ -35,9 +35,52 @@ AGENT = os.environ.get("CTX_GUARD_AGENT", "unknown")
 STATE_DIR = os.environ.get(
     "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"
 )
-STATS_FILE = os.environ.get(
-    "CTX_GUARD_STATS_FILE", os.path.join(STATE_DIR, "stats.jsonl")
+
+# Stats location, same rule in ctx-guard-run and ctx-guard-stats:
+# CTX_GUARD_STATS_FILE > $CTX_GUARD_STATE_DIR/stats.jsonl >
+# ${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard/stats.jsonl (persistent).
+# Only the persistent default falls back to the legacy runtime root.
+LEGACY_STATS_FILE = os.path.join(
+    os.environ.get("CTX_GUARD_RUNTIME_ROOT") or f"/tmp/ctx-guard-{os.getuid()}",
+    "state",
+    "stats.jsonl",
 )
+
+
+def _default_stats_file() -> str:
+    if os.environ.get("CTX_GUARD_STATS_FILE"):
+        return os.environ["CTX_GUARD_STATS_FILE"]
+    if os.environ.get("CTX_GUARD_STATE_DIR"):
+        return os.path.join(os.environ["CTX_GUARD_STATE_DIR"], "stats.jsonl")
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(base, "ctx-guard", "stats.jsonl")
+
+
+STATS_FILE = _default_stats_file()
+STATS_FILE_IS_DEFAULT = not (
+    os.environ.get("CTX_GUARD_STATS_FILE") or os.environ.get("CTX_GUARD_STATE_DIR")
+)
+
+
+def _prepare_dir(path: str) -> bool:
+    d = os.path.dirname(path)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+        return os.access(d, os.W_OK | os.X_OK)
+    except OSError:
+        return False
+
+
+def stats_write_path() -> str:
+    """Return the stats file to append to, creating its dir (mode 700)."""
+    if _prepare_dir(STATS_FILE) or not STATS_FILE_IS_DEFAULT:
+        return STATS_FILE
+    _prepare_dir(LEGACY_STATS_FILE)
+    return LEGACY_STATS_FILE
+
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -126,11 +169,10 @@ def build_posttooluse_context(message: str) -> dict:
 def record_stats_event(kind: str, **fields: Any) -> None:
     """Append one JSONL event to the stats file. Never raises."""
     try:
-        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-        os.chmod(STATE_DIR, 0o700)
+        path = stats_write_path()
         event = {"ts": time.time(), "kind": kind, "agent": AGENT, **fields}
         line = json.dumps(event, separators=(",", ":"))
-        fd = os.open(STATS_FILE, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         try:
             os.write(fd, (line + "\n").encode("utf-8"))
         finally:

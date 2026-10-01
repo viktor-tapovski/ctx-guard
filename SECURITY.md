@@ -26,6 +26,9 @@ and log files are created with restrictive permissions. Set
 default with `CTX_GUARD_REDACT_LOGS=1`; setting it to `0` stores raw output and
 should be reserved for an explicitly trusted local workflow.
 
+Usage stats (`stats.jsonl`, byte counts and rule names, no command output) persist in
+`${XDG_STATE_HOME:-~/.local/state}/ctx-guard/` (dir `700`, file `600`).
+
 The interceptor denies `env`, `printenv`, `set`, and `export` commands because
 they commonly expose credentials. It also redacts common bearer tokens, API
 keys, passwords, private-key blocks, and known token formats before output is
