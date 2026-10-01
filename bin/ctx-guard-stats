@@ -228,21 +228,16 @@ def bucket_keys(ts: float) -> dict[str, tuple[str, str]]:
 
 def build_breakdown(events: list[dict]) -> dict[str, list[dict]]:
     groups: dict[str, dict] = {g: {} for g in BREAKDOWN_TITLES}
-    for e in events:
-        kind = e.get("kind")
-        if kind not in ("ctx_guard_run", "rewrite"):
-            continue
-        orig = ret = 0
-        if kind == "ctx_guard_run":
-            orig, ret = e.get("original_bytes", 0), e.get("returned_bytes", 0)
-            saved = orig - ret
-        else:
-            saved = e.get("saved_bytes", 0)
+    legacy = [(e, True) for e in events if e.get("kind") == "rewrite"
+              and "original_bytes" not in e and "saved_bytes" in e]
+    for e, is_legacy in [(e, False) for e in measured_runs(events)] + legacy:
+        orig, ret = e.get("original_bytes", 0), e.get("returned_bytes", 0)
+        saved = e["saved_bytes"] if is_legacy else orig - ret
         for gran, (key, label) in bucket_keys(e.get("ts", 0)).items():
             row = groups[gran].setdefault(key, {
                 "label": label, "commands": 0, "original_bytes": 0,
                 "returned_bytes": 0, "saved_bytes": 0})
-            row["commands"] += kind == "ctx_guard_run"
+            row["commands"] += not is_legacy
             row["original_bytes"] += orig
             row["returned_bytes"] += ret
             row["saved_bytes"] += saved
