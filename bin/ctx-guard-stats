@@ -86,6 +86,18 @@ def load_events(path: str, since_ts: float | None) -> list[dict]:
     return events
 
 
+def spooled_paths(dest: str) -> list[str]:
+    """Drain sandbox spools (see hooks/lib spool_files) into `dest`, and return
+    any that could not be drained -- e.g. when this runs inside the sandbox
+    itself -- so they are still read instead of silently missing."""
+    try:
+        from ctx_guard_common import drain_spools, spool_files
+    except ImportError:
+        return []
+    drain_spools(dest)
+    return spool_files(dest)
+
+
 def fmt_bytes(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if abs(n) < 1024:
@@ -172,6 +184,8 @@ def print_gauge(summary: dict) -> None:
         if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
             parts.append(f"pkg-guard: {summary['pkg_blocked_count']} blocked, "
                          f"{summary['pkg_warned_count']} warned")
+        if summary["estimated"]["rewrites"]:
+            parts.append(f"est. ~{fmt_tokens(summary['estimated']['saved_tokens_est'])} tokens")
         if not parts:
             n = summary["events"]
             parts.append(f"{n} event{'' if n == 1 else 's'}")
@@ -192,6 +206,8 @@ def print_gauge(summary: dict) -> None:
     if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
         tail += (f"{sep}pkg-guard: {summary['pkg_blocked_count']} blocked, "
                  f"{summary['pkg_warned_count']} warned")
+    if summary["estimated"]["rewrites"]:
+        tail += f"{sep}+ est. ~{fmt_tokens(summary['estimated']['saved_tokens_est'])} from rewrites"
     print(f"ctx-guard  {bar}{head}"
           f"{sep}{fmt_bytes(measured['saved_bytes'])} saved"
           f"{sep}~{fmt_tokens(measured['saved_tokens_est'])} tokens"
@@ -286,10 +302,35 @@ def fmt_ms(ms: float) -> str:
     return f"{minutes}m{seconds:02d}s"
 
 
-def gains_summary(events: list[dict], top: int) -> dict:
-    """The --gains view: MEASURED events only, grouped by program name.
-    Events from before `command` was logged group under (unknown)."""
+def estimated_summary(events: list[dict]) -> dict:
+    """ESTIMATED savings: rewrites whose unbounded form never ran, sized from
+    the returned bytes and an assumed per-rule ratio. Never mixed into MEASURED."""
+    est = [e for e in events if e.get("kind") == "rewrite_estimate"]
+    by_rule = defaultdict(lambda: {"count": 0, "saved_tokens": 0})
+    for e in est:
+        r = by_rule[e.get("rule", "unknown")]
+        r["count"] += 1
+        r["saved_tokens"] += round(e.get("est_saved_bytes", 0) / 4)
+    saved = sum(e.get("est_saved_bytes", 0) for e in est)
+    return {"rewrites": len(est), "saved_bytes": saved,
+            "saved_tokens_est": round(saved / 4), "by_rule": dict(by_rule)}
+
+
+def measured_runs(events: list[dict]) -> list[dict]:
+    """ctx-guard-run events plus read-only rewrites that measured both sides
+    (named by the rule's program, e.g. git-status -> git)."""
     runs = [e for e in events if e.get("kind") == "ctx_guard_run"]
+    for e in events:
+        if e.get("kind") == "rewrite" and "original_bytes" in e:
+            runs.append({**e, "command": e.get("rule", "unknown").split("-")[0]})
+    return runs
+
+
+def gains_summary(events: list[dict], top: int) -> dict:
+    """The --gains view: MEASURED events grouped by program name, plus the
+    ESTIMATED rewrite total kept separate. Events from before `command` was
+    logged group under (unknown)."""
+    runs = measured_runs(events)
     total_orig = sum(e.get("original_bytes", 0) for e in runs)
     total_returned = sum(e.get("returned_bytes", 0) for e in runs)
     saved_bytes = max(0, total_orig - total_returned)
@@ -323,9 +364,19 @@ def gains_summary(events: list[dict], top: int) -> dict:
         "exec_ms_total": exec_ms,
         "exec_ms_avg": round(exec_ms / len(runs)) if runs else 0,
         "by_command": rows[:top],
-        "rewrites": sum(1 for e in events if e.get("kind") == "rewrite"),
+        # Unmeasured rewrites only: measured ones and wraps are rows above.
+        "rewrites": sum(1 for e in events if e.get("kind") == "rewrite"
+                        and "original_bytes" not in e
+                        and e.get("rule") not in ("compound-wrap", "runner-wrap")),
         "blocked": sum(1 for e in events if e.get("kind") == "blocked"),
+        "estimated": estimated_summary(events),
     }
+
+
+def print_estimate_line(est: dict, dot: str) -> None:
+    if est["rewrites"]:
+        print(paint(f"est. saved by rewrites: ~{fmt_tokens(est['saved_tokens_est'])} tokens "
+                    f"{dot} {est['rewrites']} rewrites (assumed per-rule ratios, not measured)", "2"))
 
 
 def color_enabled() -> bool:
@@ -337,12 +388,14 @@ def paint(text: str, code: str) -> str:
 
 
 def print_gains(g: dict) -> None:
+    uni = unicode_ok()
+    dot = "·" if uni else "-"
     if not g["total_commands"]:
         print("No measured commands yet")
         print("Run commands through ctx-guard-run, or widen --since.")
+        print_estimate_line(g["estimated"], dot)
         return
 
-    uni = unicode_ok()
     heavy, light = ("═", "─") if uni else ("=", "-")
     bars = bars_enabled()
     title = "ctx-guard Token Savings"
@@ -382,8 +435,8 @@ def print_gains(g: dict) -> None:
             line += f"  {render_bar(r['saved_tokens'], top_saved, 8)}"
         print(line)
     print()
-    dot = "·" if uni else "-"
     print(paint(f"rewrites: {g['rewrites']} {dot} blocked: {g['blocked']} (not counted above)", "2"))
+    print_estimate_line(g["estimated"], dot)
 
 
 def main() -> None:
@@ -432,7 +485,13 @@ def main() -> None:
             sys.exit(1)
         since_ts = time.time() - amount * seconds
 
+    leftover = []
+    if args.stats_file == DEFAULT_STATS_FILE:
+        ctx_guard_version()  # puts hooks/lib on sys.path
+        leftover = spooled_paths(args.stats_file)  # drains first, so this run sees it
     events = load_events(args.stats_file, since_ts)
+    for spool in leftover:
+        events += load_events(spool, since_ts)
 
     if args.gains:
         gains = gains_summary(events, args.top)
@@ -522,6 +581,7 @@ def main() -> None:
             "tool_output_bytes_by_tool": dict(tool_bytes_by_tool),
             "total_tool_output_bytes": total_tool_bytes,
         },
+        "estimated": estimated_summary(events),
         "pkg_blocked_count": len(pkg_blocked),
         "pkg_warned_count": len(pkg_warned),
     }
@@ -563,6 +623,15 @@ def main() -> None:
     print(f"  packages blocked (nonexistent/hallucinated): {summary['pkg_blocked_count']}")
     print(f"  packages warned (age/typosquat/unpinned/unverifiable/bypass-flag): "
           f"{summary['pkg_warned_count']}")
+    est = summary["estimated"]
+    print()
+    print("== ESTIMATED (rewrites: returned bytes + assumed per-rule ratio -- not measured) ==")
+    print(f"  rewrites estimated:     {est['rewrites']}")
+    print(f"  estimated tokens saved: ~{fmt_tokens(est['saved_tokens_est'])}")
+    rules = sorted(est["by_rule"].items(), key=lambda kv: -kv[1]["saved_tokens"])[:10]
+    max_est = max((r["saved_tokens"] for _, r in rules), default=0)
+    for rule, r in rules:
+        print_bar(rule, r["saved_tokens"], max_est, f"~{fmt_tokens(r['saved_tokens'])} ({r['count']})")
 
 
 if __name__ == "__main__":
