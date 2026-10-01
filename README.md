@@ -123,6 +123,7 @@ ctx-guard-stats            # one-line savings gauge
 ctx-guard-stats --verbose  # full MEASURED/OBSERVED report
 ctx-guard-stats --json     # machine-readable
 ctx-guard-stats --since 7d # last 7 days only
+ctx-guard-stats --breakdown [daily|weekly|monthly]  # per-period table (bare = all)
 ctx-guard-stats --reset    # clear the log
 ctx-guard-stats --version  # which ctx-guard is installed
 ```
@@ -147,7 +148,7 @@ honestly-labeled sections:
 - **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
 - **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`) and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof.
 
-All stats are per-agent (`claude-code` / `copilot-cli`), recorded to `$CTX_GUARD_STATE_DIR/stats.jsonl` (default `/tmp/ctx-guard-<uid>/state/stats.jsonl`), one JSON object per line, mode `600`.
+All stats are per-agent (`claude-code` / `copilot-cli`), recorded to `${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard/stats.jsonl` (persistent across reboots; dir mode `700`), one JSON object per line, mode `600`. If that dir is not writable, writers fall back to `/tmp/ctx-guard-<uid>/state/stats.jsonl`. `ctx-guard-uninstall` leaves this file in place.
 
 ## How cross-tool compatibility works
 
@@ -172,8 +173,8 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | `CTX_GUARD_WINDOW` | 200000 | Assumed context window for % thresholds (Claude Code only; set 1000000 for 1M-window models) |
 | `CTX_GUARD_LOG_DIR` | /tmp/ctx-guard-\<uid\>/logs | Full-output archive |
 | `CTX_GUARD_SCRIPT_DIR` | /tmp/ctx-guard-\<uid\>/scripts | Temp scripts used to wrap generic commands |
-| `CTX_GUARD_STATE_DIR` | /tmp/ctx-guard-\<uid\>/state | Per-session "already warned" markers + `stats.jsonl` |
-| `CTX_GUARD_STATS_FILE` | `$CTX_GUARD_STATE_DIR/stats.jsonl` | Override the stats log location |
+| `CTX_GUARD_STATE_DIR` | /tmp/ctx-guard-\<uid\>/state | Per-session "already warned" markers; if set, `stats.jsonl` lives here too |
+| `CTX_GUARD_STATS_FILE` | `${XDG_STATE_HOME:-~/.local/state}/ctx-guard/stats.jsonl` | Override the stats log location (wins over `CTX_GUARD_STATE_DIR`) |
 
 If `CTX_GUARD_LOG_DIR` or `CTX_GUARD_STATE_DIR` is not writable -- as happens under an agent sandbox that only permits writes to `$TMPDIR` and the project dir -- `ctx-guard-run` falls back to `$TMPDIR/ctx-guard-<uid>/`. With nowhere writable at all it runs the command uncapped rather than failing it.
 | `CTX_GUARD_LOG_RETENTION_DAYS` | 7 | Archived logs older than this are deleted on every run |

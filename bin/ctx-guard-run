@@ -4,12 +4,15 @@
 # a real, measured before/after byte count to the shared stats file so
 # `ctx-guard-stats` can report actual (not estimated) token savings.
 #
-# Usage: ctx-guard-run <script-file>
+# Usage: ctx-guard-run <script-file> [agent]
 # Env:   CTX_GUARD_MAX_LINES          (default 150)  max lines returned to context
 #        CTX_GUARD_LOG_DIR            (default /tmp/ctx-guard-<uid>/logs; falls
 #                                     back to $TMPDIR when that is not writable)
 #        CTX_GUARD_LOG_RETENTION_DAYS (default 7)     delete archived logs older than this
-#        CTX_GUARD_STATE_DIR          (default /tmp/ctx-guard-<uid>/state) stats.jsonl lives here
+#        CTX_GUARD_STATE_DIR          (default /tmp/ctx-guard-<uid>/state) session markers; also stats.jsonl
+#                                     if set explicitly
+#        CTX_GUARD_STATS_FILE         (default ${XDG_STATE_HOME:-~/.local/state}/ctx-guard/stats.jsonl;
+#                                     falls back to /tmp/ctx-guard-<uid>/state/stats.jsonl)
 #        CTX_GUARD_AGENT              (default "unknown") tag written into stats events
 
 set -uo pipefail
@@ -20,9 +23,8 @@ LOG_DIR="${CTX_GUARD_LOG_DIR:-$DEFAULT_ROOT/logs}"
 RETENTION_DAYS="${CTX_GUARD_LOG_RETENTION_DAYS:-7}"
 REDACT_LOGS="${CTX_GUARD_REDACT_LOGS:-1}"
 STATE_DIR="${CTX_GUARD_STATE_DIR:-$DEFAULT_ROOT/state}"
-AGENT="${CTX_GUARD_AGENT:-unknown}"
-
 SCRIPT="$1"
+AGENT="${2:-${CTX_GUARD_AGENT:-unknown}}"
 
 usable_dir() {
   local dir="$1" probe
@@ -47,7 +49,24 @@ if ! usable_dir "$LOG_DIR"; then
 fi
 
 usable_dir "$STATE_DIR" || STATE_DIR="$FALLBACK_ROOT/state"
-STATS_FILE="${CTX_GUARD_STATS_FILE:-$STATE_DIR/stats.jsonl}"
+
+# Stats: CTX_GUARD_STATS_FILE > $CTX_GUARD_STATE_DIR/stats.jsonl > persistent XDG
+# default, which falls back to the legacy runtime root when not writable.
+if [ -n "${CTX_GUARD_STATS_FILE:-}" ]; then
+  STATS_FILE="$CTX_GUARD_STATS_FILE"
+elif [ -n "${CTX_GUARD_STATE_DIR:-}" ]; then
+  STATS_FILE="$STATE_DIR/stats.jsonl"
+else
+  PERSIST_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard"
+  if usable_dir "$PERSIST_DIR"; then
+    chmod 700 "$PERSIST_DIR" 2>/dev/null || true
+    STATS_FILE="$PERSIST_DIR/stats.jsonl"
+  else
+    LEGACY_DIR="${CTX_GUARD_RUNTIME_ROOT:-$DEFAULT_ROOT}/state"
+    usable_dir "$LEGACY_DIR" || LEGACY_DIR="$STATE_DIR"
+    STATS_FILE="$LEGACY_DIR/stats.jsonl"
+  fi
+fi
 
 chmod 700 "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
 
