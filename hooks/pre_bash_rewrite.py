@@ -22,11 +22,13 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
+    AGENT,
     build_pretooluse_decision,
     normalize_tool_call,
     record_stats_event,
@@ -88,6 +90,32 @@ RUNNERS = re.compile(
 )
 
 
+MEASURABLE_RULES = {"git-status", "git-log", "git-diff", "git-show", "git-branch-a"}
+MEASURE_TIMEOUT_S = 2
+MEASURE_CAP_BYTES = 1_000_000
+
+
+def _output_size(cmd: str) -> int | None:
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=MEASURE_TIMEOUT_S,
+            stdin=subprocess.DEVNULL,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return min(len(proc.stdout) + len(proc.stderr), MEASURE_CAP_BYTES)
+
+
+def measure_saved_bytes(rule: str, original: str, rewritten: str) -> int | None:
+    """Bytes saved by a read-only rewrite, or None when not safe/possible to measure."""
+    if rule not in MEASURABLE_RULES:
+        return None
+    before, after = _output_size(original), _output_size(rewritten)
+    if before is None or after is None:
+        return None
+    return max(0, before - after)
+
+
 def already_filtered(cmd: str) -> bool:
     return bool(re.search(r"\|\s*(head|tail|grep|rg|awk|sed|wc|ctx-guard)", cmd)) \
         or "ctx-guard-run" in cmd
@@ -100,7 +128,7 @@ def wrap_generic(cmd: str) -> str:
     fd, path = tempfile.mkstemp(suffix=".sh", dir=SCRIPT_DIR)
     with os.fdopen(fd, "w") as f:
         f.write("#!/usr/bin/env bash\n" + cmd + "\n")
-    return f"{shlex.quote(CTX_GUARD_RUN)} {shlex.quote(path)}"
+    return f"{shlex.quote(CTX_GUARD_RUN)} {shlex.quote(path)} {shlex.quote(AGENT)}"
 
 
 def transform(cmd: str) -> tuple[str | None, str | None, str | None] | None:
@@ -182,7 +210,9 @@ def main() -> None:
             return
 
         new_args = {**tool_args, "command": new_cmd}
-        record_stats_event("rewrite", rule=rule, tool_name=tool_name)
+        saved = measure_saved_bytes(rule, cmd, new_cmd)
+        extra = {"saved_bytes": saved} if saved is not None else {}
+        record_stats_event("rewrite", rule=rule, tool_name=tool_name, **extra)
         reason = f"ctx-guard: rewrote to token-efficient form ({rule})"
         if pkg_warning:
             record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
