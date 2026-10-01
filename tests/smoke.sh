@@ -527,6 +527,17 @@ assert d["totals"]["original_bytes"] == 56000 and d["totals"]["returned_bytes"] 
 assert d["totals"]["saved_bytes"] == 46000, d["totals"]
 assert sum(g["saved_bytes"] for g in d["daily"]) == 46000, d["daily"]
 ' && ok "--breakdown --json valid with groups and totals" || bad "breakdown json wrong -> $bd_json"
+bd_m_file="$SCRATCH/breakdown-measured.jsonl"
+printf '%s\n' \
+  '{"ts":1769774400,"agent":"claude-code","kind":"ctx_guard_run","original_bytes":4000,"returned_bytes":1000}' \
+  '{"ts":1769774401,"agent":"claude-code","kind":"rewrite","rule":"git-status","original_bytes":800,"returned_bytes":400,"saved_bytes":400}' > "$bd_m_file"
+python3 "$DIR/bin/ctx-guard-stats" --stats-file "$bd_m_file" --breakdown daily --json | python3 -c '
+import json, sys
+t = json.load(sys.stdin)["totals"]
+assert (t["commands"], t["original_bytes"], t["returned_bytes"], t["saved_bytes"]) == (2, 4800, 1400, 3400), t
+assert t["saved_pct"] == 70.8, t
+' && ok "--breakdown counts measured rewrites in input/output, not only saved" \
+  || bad "measured rewrite breakdown wrong"
 bd_since=$(bd --breakdown --since 1d)
 echo "$bd_since" | grep -q "2026-01-30" \
   && bad "--since did not filter breakdown -> $bd_since" || ok "--since filters breakdown data"
