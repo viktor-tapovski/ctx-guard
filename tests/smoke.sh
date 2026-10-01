@@ -21,6 +21,9 @@ export CTX_GUARD_LOG_DIR="$SCRATCH/logs"
 export CTX_GUARD_STATE_DIR="$SCRATCH/state"
 export CTX_GUARD_STATS_FILE="$SCRATCH/state/stats.jsonl"
 export CTX_GUARD_LOG_RETENTION_DAYS=7
+export CTX_GUARD_SPOOL_DIRS="$SCRATCH/no-spool"
+# ctx-guard-uninstall removes the runtime root; keep it off the real one.
+export CTX_GUARD_RUNTIME_ROOT="$SCRATCH/runtime"
 
 PASS=0
 FAIL=0
@@ -683,6 +686,8 @@ run_cmd 'cd /tmp && git --version | head -1'
 [ "$(last_command)" = "git" ] && ok "command extraction skips cd <dir> &&" || bad "cd && -> $(last_command)"
 run_cmd 'FOO=1 sudo -n true --secret-arg=hunter2'
 [ "$(last_command)" = "true" ] && ok "command extraction skips VAR=value and sudo" || bad "FOO=1 sudo -> $(last_command)"
+run_cmd 'A=1; B=2; true'
+[ "$(last_command)" = "true" ] && ok "command extraction skips VAR=value;" || bad "A=1; -> $(last_command)"
 run_cmd '/usr/bin/env echo hi'
 [ "$(last_command)" = "echo" ] && ok "command extraction takes the basename" || bad "basename -> $(last_command)"
 run_cmd '(echo "unterminated'
@@ -694,6 +699,89 @@ import json, sys
 evs = [json.loads(l) for l in open(sys.argv[1])]
 assert evs and all(isinstance(e["duration_ms"], int) and e["duration_ms"] >= 0 for e in evs)
 PY
+
+# --- sandbox spool drain ------------------------------------------------------
+
+echo "== sandbox spool drain =="
+
+spool_root="$SCRATCH/spool-root"
+spool="$spool_root/ctx-guard-$(id -u)/state/stats.jsonl"
+drain_dest="$SCRATCH/drain/stats.jsonl"
+mkdir -p "$(dirname "$spool")" "$(dirname "$drain_dest")"
+echo '{"ts":1,"kind":"ctx_guard_run","original_bytes":900,"returned_bytes":100}' > "$spool"
+post_payload='{"tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":"x"}}'
+echo "$post_payload" | CTX_GUARD_SPOOL_DIRS="$spool_root" CTX_GUARD_STATS_FILE="$drain_dest" \
+  python3 "$DIR/hooks/context_monitor.py" >/dev/null
+grep -q '"original_bytes":900' "$drain_dest" && [ ! -e "$spool" ] \
+  && ok "PostToolUse drains the sandbox spool into the stats file" || bad "spool not drained"
+
+echo '{"ts":2,"kind":"ctx_guard_run","original_bytes":800,"returned_bytes":100}' > "$spool"
+# A directory as the stats file makes the append fail after the spool is claimed.
+ro_dir="$SCRATCH/ro"
+mkdir -p "$ro_dir/stats.jsonl"
+echo "$post_payload" | CTX_GUARD_SPOOL_DIRS="$spool_root" CTX_GUARD_STATS_FILE="$ro_dir/stats.jsonl" \
+  python3 "$DIR/hooks/context_monitor.py" >/dev/null
+grep -q '"original_bytes":800' "$spool" && [ -z "$(ls "$(dirname "$spool")" | grep drain)" ] \
+  && ok "unwritable stats file leaves the spool intact" || bad "spool lost with unwritable dest"
+
+reader_out=$(CTX_GUARD_SPOOL_DIRS="$spool_root" CTX_GUARD_STATS_FILE="$ro_dir/stats.jsonl" \
+  python3 "$STATS" --gains --json)
+echo "$reader_out" | grep -q '"total_commands": 1' \
+  && ok "ctx-guard-stats reads an undrainable spool" || bad "spool not read -> $reader_out"
+
+reader_out=$(CTX_GUARD_SPOOL_DIRS="$spool_root" CTX_GUARD_STATS_FILE="$drain_dest" \
+  python3 "$STATS" --gains --json)
+echo "$reader_out" | grep -q '"total_commands": 2' && [ ! -e "$spool" ] \
+  && ok "ctx-guard-stats drains then shows the spool in the same run" || bad "drained spool missing -> $reader_out"
+
+# --- ESTIMATED rewrite savings -----------------------------------------------
+
+echo "== estimated rewrite savings =="
+
+est_stats="$SCRATCH/est/stats.jsonl"
+mkdir -p "$(dirname "$est_stats")"
+pre='{"tool_use_id":"toolu_est1","tool_name":"Bash","tool_input":{"command":"grep -rn foo ."}}'
+post='{"tool_use_id":"toolu_est1","tool_name":"Bash","tool_input":{"command":"grep -rn foo ."},"tool_response":{"stdout":"'"$(printf 'a%.0s' $(seq 1 400))"'"}}'
+echo "$pre" | CTX_GUARD_STATS_FILE="$est_stats" python3 "$DIR/hooks/pre_bash_rewrite.py" >/dev/null
+[ -f "$CTX_GUARD_STATE_DIR/pending/toolu_est1" ] && ok "unmeasured rewrite leaves a pending marker" \
+  || bad "no pending marker for grep rewrite"
+echo "$post" | CTX_GUARD_STATS_FILE="$est_stats" python3 "$DIR/hooks/context_monitor.py" >/dev/null
+echo "$post" | CTX_GUARD_STATS_FILE="$est_stats" python3 "$DIR/hooks/context_monitor.py" >/dev/null
+est_n=$(grep -c '"kind":"rewrite_estimate"' "$est_stats")
+grep -q '"rule":"grep-unbounded".*"returned_bytes":400,"est_saved_bytes":400' "$est_stats" && [ "$est_n" = 1 ] \
+  && ok "PostToolUse records one estimate from the rule ratio" || bad "estimate wrong (n=$est_n) -> $(cat "$est_stats")"
+
+est_out=$(python3 "$STATS" --stats-file "$est_stats" --gains)
+echo "$est_out" | grep -q "est. saved by rewrites: ~100 tokens" \
+  && ok "--gains shows the ESTIMATED line separately" || bad "--gains estimate line -> $est_out"
+python3 "$STATS" --stats-file "$est_stats" --json | grep -q '"saved_tokens_est": 100' \
+  && ok "--json carries the estimate" || bad "--json estimate missing"
+
+mixed="$SCRATCH/mixed.jsonl"
+echo '{"ts":1,"kind":"rewrite","rule":"git-status","original_bytes":4000,"returned_bytes":1000,"saved_bytes":3000}' > "$mixed"
+python3 "$STATS" --stats-file "$mixed" --gains | grep -qE '^ +1  git +1 +750' \
+  && ok "--gains lists measured rewrites by program" || bad "measured rewrite row missing"
+
+# --- measured git rewrites: never execute repo-controlled config ---------------
+
+echo "== measured git rewrites =="
+
+git_repo="$SCRATCH/git-repo"
+mkdir -p "$git_repo" && (cd "$git_repo" && git init -q && echo hi > a.txt && git add a.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm init && echo more >> a.txt)
+git_stats="$SCRATCH/git-stats/stats.jsonl"
+mkdir -p "$(dirname "$git_stats")"
+git_pre='{"tool_use_id":"toolu_git1","tool_name":"Bash","tool_input":{"command":"git diff"}}'
+(cd "$git_repo" && echo "$git_pre" | CTX_GUARD_STATS_FILE="$git_stats" python3 "$DIR/hooks/pre_bash_rewrite.py" >/dev/null)
+grep -q '"rule":"git-diff","tool_name":"Bash","original_bytes":' "$git_stats" \
+  && ok "git rewrite measured in a repo with inert config" || bad "git rewrite not measured -> $(cat "$git_stats")"
+
+(cd "$git_repo" && echo '*.txt filter=evil' > .gitattributes \
+  && git config filter.evil.clean "sh -c 'touch $SCRATCH/PWNED; cat'")
+: > "$git_stats"
+(cd "$git_repo" && echo "$git_pre" | CTX_GUARD_STATS_FILE="$git_stats" python3 "$DIR/hooks/pre_bash_rewrite.py" >/dev/null)
+[ ! -e "$SCRATCH/PWNED" ] && ! grep -q original_bytes "$git_stats" \
+  && ok "repo-local filter config skips measurement (no code run)" || bad "measurement ran repo filter config"
 
 echo
 echo "== summary: $PASS passed, $FAIL failed =="

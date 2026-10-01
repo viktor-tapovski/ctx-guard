@@ -29,8 +29,13 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
     AGENT,
+    PENDING_DIR,
+    PENDING_MAX_AGE_S,
     build_pretooluse_decision,
+    estimate_ratio,
     normalize_tool_call,
+    pending_key,
+    prune_old,
     record_stats_event,
 )
 import pkg_install_check
@@ -106,14 +111,68 @@ def _output_size(cmd: str) -> int | None:
     return min(len(proc.stdout) + len(proc.stderr), MEASURE_CAP_BYTES)
 
 
-def measure_saved_bytes(rule: str, original: str, rewritten: str) -> int | None:
-    """Bytes saved by a read-only rewrite, or None when not safe/possible to measure."""
-    if rule not in MEASURABLE_RULES:
+# Measurement runs in the hook, outside any agent sandbox, so stop repo config
+# from executing code there (fsmonitor daemons, external diff, textconv).
+SAFE_GIT = re.compile(r"^git (status|log|diff|show|branch)\b")
+NO_EXEC_OPTS = {"diff": " --no-ext-diff --no-textconv", "show": " --no-ext-diff --no-textconv"}
+
+
+def _harden_git(cmd: str) -> str:
+    def sub(m: re.Match) -> str:
+        return f"git -c core.fsmonitor=false --no-pager {m.group(1)}{NO_EXEC_OPTS.get(m.group(1), '')}"
+    return SAFE_GIT.sub(sub, cmd)
+
+
+# The flags above don't cover everything (filter.*.clean via .gitattributes,
+# gpg.program, include.path, ...), and the repo's .git/config is writable from
+# inside the agent sandbox. So only measure when every repo-local key is one of
+# these inert ones; user/system config isn't sandbox-writable and is trusted.
+SAFE_LOCAL_GIT_KEY = re.compile(
+    r"^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|"
+    r"precomposeunicode|symlinks|autocrlf)|remote\.[^.]+(\.[^.]+)*\.(url|fetch|pushurl|tagopt|prune)|"
+    r"branch\.[^.]+(\.[^.]+)*\.(remote|merge|rebase|pushremote|description|vscode-merge-base)|user\.(name|email)|pull\.rebase|"
+    r"init\.defaultbranch|extensions\.objectformat)$"
+)
+
+
+def git_config_is_inert() -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--local", "--list", "--name-only"],
+            capture_output=True, text=True, timeout=MEASURE_TIMEOUT_S, stdin=subprocess.DEVNULL,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return all(SAFE_LOCAL_GIT_KEY.match(k) for k in proc.stdout.lower().split())
+
+
+def measure_bytes(rule: str, original: str, rewritten: str) -> tuple[int, int] | None:
+    """(before, after) output bytes of a read-only rewrite, or None when not
+    safe/possible to measure."""
+    if rule not in MEASURABLE_RULES or not git_config_is_inert():
         return None
-    before, after = _output_size(original), _output_size(rewritten)
+    before, after = _output_size(_harden_git(original)), _output_size(_harden_git(rewritten))
     if before is None or after is None:
         return None
-    return max(0, before - after)
+    return before, after
+
+
+def mark_pending(payload: dict, rule: str, cmd: str) -> None:
+    """Leave the rule for context_monitor.py, which knows the returned bytes
+    and records an ESTIMATED saving for it. Keyed on the original command:
+    PostToolUse payloads carry the pre-rewrite tool_input. Best-effort."""
+    if estimate_ratio(rule) is None:
+        return
+    try:
+        os.makedirs(PENDING_DIR, mode=0o700, exist_ok=True)
+        os.chmod(PENDING_DIR, 0o700)
+        prune_old(PENDING_DIR, PENDING_MAX_AGE_S)
+        with open(os.path.join(PENDING_DIR, pending_key(payload, cmd)), "w") as f:
+            f.write(rule)
+    except OSError:
+        pass
 
 
 def already_filtered(cmd: str) -> bool:
@@ -210,8 +269,14 @@ def main() -> None:
             return
 
         new_args = {**tool_args, "command": new_cmd}
-        saved = measure_saved_bytes(rule, cmd, new_cmd)
-        extra = {"saved_bytes": saved} if saved is not None else {}
+        measured = measure_bytes(rule, cmd, new_cmd)
+        extra = {}
+        if measured is not None:
+            before, after = measured
+            extra = {"original_bytes": before, "returned_bytes": after,
+                     "saved_bytes": max(0, before - after)}
+        elif rule not in ("compound-wrap", "runner-wrap"):
+            mark_pending(payload, rule, cmd)
         record_stats_event("rewrite", rule=rule, tool_name=tool_name, **extra)
         reason = f"ctx-guard: rewrote to token-efficient form ({rule})"
         if pkg_warning:
