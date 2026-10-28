@@ -17,7 +17,7 @@ and non-blocking:
 3. Stats plumbing that needs to run outside the agent sandbox: drains
    ctx-guard-run's sandbox spool into the stats file, records ESTIMATED
    savings for rewrites pre_bash_rewrite.py couldn't measure, and prunes
-   wrap scripts the sandboxed ctx-guard-run couldn't delete.
+   leftover wrap scripts.
 
 Never raises: on any error, logs to stderr and exits 0 with no stdout, which
 both runtimes treat as "no action, continue normally".
@@ -42,13 +42,12 @@ from ctx_guard_common import (  # noqa: E402
     safe_session_id,
 )
 
-# ctx-guard-run deletes its script, but inside an agent sandbox it can't, so
-# leftovers are pruned here. bash holds the script open, so pruning is safe
-# once a run has started; the age gives slow starters plenty of margin.
+# Leftover wrap scripts from older ctx-guard versions (the hook now pipes
+# through ctx-guard-run --filter instead) and manual script-mode runs.
 SCRIPT_DIR = os.environ.get(
     "CTX_GUARD_SCRIPT_DIR", f"/tmp/ctx-guard-{os.getuid()}/scripts"
 )
-SCRIPT_MAX_AGE_S = 300
+SCRIPT_MAX_AGE_S = 6 * 3600
 
 WINDOW_TOKENS = int(os.environ.get("CTX_GUARD_WINDOW", "200000"))
 THRESHOLDS = [50, 70, 85]
