@@ -799,6 +799,86 @@ grep -q '"rule":"git-diff","tool_name":"Bash","original_bytes":' "$git_stats" \
 [ ! -e "$SCRATCH/PWNED" ] && ! grep -q original_bytes "$git_stats" \
   && ok "repo-local filter config skips measurement (no code run)" || bad "measurement ran repo filter config"
 
+# --- ctx-guard-statusline ----------------------------------------------------
+
+echo "== ctx-guard-statusline =="
+
+sl_file="$SCRATCH/sl/stats.jsonl"
+sl_rollup="$SCRATCH/sl/stats.rollup.json"
+mkdir -p "$SCRATCH/sl"
+sl() { CTX_GUARD_STATS_FILE="$sl_file" "$DIR/bin/ctx-guard-statusline" "$@" </dev/null; }
+sl_event() { # sl_event <agent> <kind> <ts offset s> <bytes>
+  python3 - "$sl_file" "$@" <<'PY'
+import json, sys, time
+path, agent, kind, offset, n = sys.argv[1:6]
+ev = {"ts": time.time() + float(offset), "kind": kind, "agent": agent}
+if kind == "ctx_guard_run":
+    ev.update(original_bytes=int(n) + 400, returned_bytes=400)
+else:
+    ev.update(est_saved_bytes=int(n))
+with open(path, "a") as f:
+    f.write(json.dumps(ev) + "\n")
+PY
+}
+
+[ -z "$(sl claude-code)" ] && ok "missing stats prints nothing" || bad "missing stats printed -> $(sl claude-code)"
+
+sl_event claude-code ctx_guard_run 0 8000
+sl_event claude-code rewrite_estimate 0 4000
+sl_event copilot-cli ctx_guard_run 0 400000
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 2.0k (~1.0k) · total 2.0k (~1.0k)" ] \
+  && ok "segment shows measured and ~estimated for this agent only" || bad "segment -> $out"
+[ "$(mode_of "$sl_rollup")" = "600" ] && ok "rollup file is mode 600" || bad "rollup mode -> $(mode_of "$sl_rollup")"
+
+sl_event claude-code ctx_guard_run 0 4000
+sl_event claude-code ctx_guard_run -172800 40000
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 3.0k (~1.0k) · total 13.0k (~1.0k)" ] \
+  && ok "rollup adds appended events; old ts counts in total only" || bad "incremental -> $out"
+offset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["offset"])' "$sl_rollup")
+[ "$offset" = "$(wc -c < "$sl_file" | tr -d ' ')" ] && ok "rollup offset at end of stats file" || bad "offset -> $offset"
+
+python3 - "$sl_rollup" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1])); r["day"] = "2000-01-01"; json.dump(r, open(sys.argv[1], "w"))
+PY
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 0 · total 13.0k (~1.0k)" ] && ok "midnight rollover resets today" || bad "rollover -> $out"
+
+head -1 "$sl_file" > "$sl_file.tmp" && cat "$sl_file.tmp" > "$sl_file"
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 2.0k · total 2.0k" ] && ok "truncated stats file rebuilds rollup" || bad "truncate -> $out"
+echo '{"ts": null, "kind": "ctx_guard_run", "agent": "claude-code", "original_bytes": "x"}' >> "$sl_file"
+sl_event claude-code ctx_guard_run 0 4000
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 3.0k · total 3.0k" ] && ok "malformed event skipped, later ones counted" || bad "malformed -> $out"
+[ -z "$(sl unknown-agent)" ] && ok "agent without savings prints nothing" || bad "other agent -> $(sl unknown-agent)"
+
+SL_HOME="$SCRATCH/sl-home"
+mkdir -p "$SL_HOME/.claude"
+echo '{"statusLine": {"type": "command", "command": "echo base", "padding": 1}}' > "$SL_HOME/.claude/settings.json"
+HOME="$SL_HOME" bash "$DIR/install.sh" --statusline >/dev/null
+HOME="$SL_HOME" bash "$DIR/install.sh" --statusline >/dev/null
+out=$(echo '{}' | CTX_GUARD_STATS_FILE="$sl_file" python3 -c 'import json,subprocess,sys
+cmd = json.load(open(sys.argv[1]))["statusLine"]["command"]
+print(subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True).stdout, end="")' "$SL_HOME/.claude/settings.json")
+[ "$out" = "base │ ctx-guard ⬇ today 3.0k · total 3.0k" ] \
+  && ok "reinstalled Claude status line chains the original" || bad "chained Claude status line -> $out"
+grep -q '"command": ".*ctx-guard-statusline'"'"'\{0,1\} copilot-cli"' "$SL_HOME/.copilot/settings.json" \
+  && ok "Copilot status line set" || bad "Copilot settings -> $(cat "$SL_HOME/.copilot/settings.json")"
+out=$(PYTHONIOENCODING=ascii CTX_GUARD_STATS_FILE="$sl_file" "$SL_HOME/.ctx-guard/bin/ctx-guard-statusline" claude-code </dev/null)
+[ "$out" = "base │ ctx-guard ⬇ today 3.0k · total 3.0k" ] && ok "non-UTF-8 stdout still prints both parts" || bad "ascii stdout -> $out"
+HOME="$SL_HOME" "$DIR/bin/ctx-guard-uninstall" >/dev/null
+python3 - "$SL_HOME" <<'PY' && ok "uninstall restores both status lines" || bad "status lines not restored"
+import json, sys
+home = sys.argv[1]
+claude = json.load(open(f"{home}/.claude/settings.json"))
+copilot = json.load(open(f"{home}/.copilot/settings.json"))
+assert claude["statusLine"] == {"type": "command", "command": "echo base", "padding": 1}, claude
+assert "statusLine" not in copilot, copilot
+PY
+
 echo
 echo "== summary: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
