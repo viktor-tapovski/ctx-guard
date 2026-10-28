@@ -451,12 +451,20 @@ def main() -> None:
                         help="show measured token savings per command instead of the default report")
     parser.add_argument("-n", "--top", type=int, default=10, metavar="N",
                         help="rows in the --gains By Command table (default 10)")
+    parser.add_argument("--watch", action="store_true",
+                        help="with --gains: keep running and refresh as new events arrive")
+    parser.add_argument("--interval", type=float, default=1.0, metavar="SECS",
+                        help="--watch refresh interval in seconds (default 1)")
     parser.add_argument("--reset", action="store_true", help="delete the stats file and exit")
     args = parser.parse_args()
     if args.gains and (args.verbose or args.breakdown):
         parser.error("--gains cannot be combined with --verbose or --breakdown")
     if args.top < 1:
         parser.error("--top must be at least 1")
+    if args.watch and not args.gains:
+        parser.error("--watch requires --gains")
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
 
     if args.reset:
         if os.path.isfile(args.stats_file):
@@ -480,22 +488,41 @@ def main() -> None:
             sys.exit(1)
         since_ts = time.time() - amount * seconds
 
-    leftover = []
-    if args.stats_file == DEFAULT_STATS_FILE:
-        ctx_guard_version()  # puts hooks/lib on sys.path
-        leftover = spooled_paths(args.stats_file)  # drains first, so this run sees it
-    events = load_events(args.stats_file, since_ts)
-    for spool in leftover:
-        events += load_events(spool, since_ts)
+    def collect_events() -> list[dict]:
+        leftover = []
+        if args.stats_file == DEFAULT_STATS_FILE:
+            ctx_guard_version()  # puts hooks/lib on sys.path
+            leftover = spooled_paths(args.stats_file)  # drains first, so this run sees it
+        found = load_events(args.stats_file, since_ts)
+        for spool in leftover:
+            found += load_events(spool, since_ts)
+        return found
 
-    if args.gains:
-        gains = gains_summary(events, args.top)
+    def show_gains(evs: list[dict]) -> None:
+        gains = gains_summary(evs, args.top)
         if args.json:
             for row in gains["by_command"]:
                 del row["total_ms"]
             print(json.dumps({"gains": gains}, indent=2))
         else:
             print_gains(gains)
+
+    if args.gains and args.watch:
+        tty = sys.stdout.isatty()
+        try:
+            while True:
+                # Clear on a terminal; form feed separates frames when piped.
+                sys.stdout.write("\033[2J\033[H" if tty else "")
+                show_gains(collect_events())
+                sys.stdout.write("" if tty else "\f")
+                sys.stdout.flush()
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return
+
+    events = collect_events()
+    if args.gains:
+        show_gains(events)
         return
 
     if not events:

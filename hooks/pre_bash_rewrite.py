@@ -24,7 +24,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
@@ -42,9 +41,6 @@ import pkg_install_check
 
 CTX_GUARD_RUN = os.environ.get(
     "CTX_GUARD_RUN", os.path.expanduser("~/.ctx-guard/bin/ctx-guard-run")
-)
-SCRIPT_DIR = os.environ.get(
-    "CTX_GUARD_SCRIPT_DIR", f"/tmp/ctx-guard-{os.getuid()}/scripts"
 )
 
 # Commands that are already cheap -- never touch these.
@@ -180,14 +176,51 @@ def already_filtered(cmd: str) -> bool:
         or "ctx-guard-run" in cmd
 
 
+_WRAPPERS = {"sudo", "env", "time", "command", "nice"}
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_NAME = re.compile(r"^[A-Za-z0-9_.+@-]+$")
+
+
+def program_name(cmd: str) -> str:
+    """First real program in cmd, for stats only (mirrors ctx-guard-run)."""
+    line = next((l.strip() for l in cmd.splitlines()
+                 if l.strip() and not l.strip().startswith("#")), "")
+    try:
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = "#"
+        tokens = list(lex)
+    except ValueError:
+        return "unknown"
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _ASSIGNMENT.match(tok) or tok in (";", "&&", "||", "&"):
+            i += 1
+        elif tok == "cd":
+            while i < len(tokens) and tokens[i] not in ("&&", ";"):
+                i += 1
+            i += 1
+        elif os.path.basename(tok) in _WRAPPERS:
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 2 if os.path.basename(tok) == "nice" and tokens[i] == "-n" else 1
+        else:
+            name = os.path.basename(tok)
+            return name if _NAME.match(name) else "unknown"
+    return "unknown"
+
+
 def wrap_generic(cmd: str) -> str:
-    """Write cmd to a temp script and run it through ctx-guard-run (safe quoting)."""
-    os.makedirs(SCRIPT_DIR, mode=0o700, exist_ok=True)
-    os.chmod(SCRIPT_DIR, 0o700)  # makedirs' mode is masked by umask; enforce explicitly
-    fd, path = tempfile.mkstemp(suffix=".sh", dir=SCRIPT_DIR)
-    with os.fdopen(fd, "w") as f:
-        f.write("#!/usr/bin/env bash\n" + cmd + "\n")
-    return f"{shlex.quote(CTX_GUARD_RUN)} {shlex.quote(path)} {shlex.quote(AGENT)}"
+    """Pipe cmd's output through ctx-guard-run's filter mode.
+
+    cmd stays verbatim in the command line (no temp script), so the agent's
+    permission check sees and matches the real commands, and ctx-guard-run
+    itself only ever filters stdin. The subshell keeps pipefail from leaking
+    into persistent shells; the newline before } terminates heredocs/comments.
+    """
+    run = f"{shlex.quote(CTX_GUARD_RUN)} --filter {shlex.quote(AGENT)} {shlex.quote(program_name(cmd))}"
+    return f"(set -o pipefail; {{ {cmd}\n}} 2>&1 | {run})"
 
 
 def transform(cmd: str) -> tuple[str | None, str | None, str | None] | None:

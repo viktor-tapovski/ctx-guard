@@ -60,7 +60,7 @@ got=$(rewrite_claude "docker logs mycontainer")
 [ "$got" = "docker logs mycontainer | tail -100" ] && ok "docker logs rewrite" || bad "docker logs rewrite -> $got"
 
 got=$(rewrite_claude "docker logs -f mycontainer")
-[[ "$got" == "$CTX_GUARD_RUN "* ]] && ok "docker logs -f falls back to generic wrap, not naive tail" || bad "docker logs -f -> $got"
+[[ "$got" == *"| $CTX_GUARD_RUN --filter "* ]] && ok "docker logs -f falls back to generic wrap, not naive tail" || bad "docker logs -f -> $got"
 
 got=$(rewrite_claude "kubectl get pods -A")
 [ "$got" = "kubectl get pods -A | head -50" ] && ok "kubectl get rewrite" || bad "kubectl get rewrite -> $got"
@@ -75,13 +75,18 @@ got=$(rewrite_claude "terraform plan -var foo=bar")
 [ "$got" = "terraform plan -var foo=bar -no-color | tail -100" ] && ok "terraform plan rewrite" || bad "terraform plan rewrite -> $got"
 
 got=$(rewrite_claude "grep foo file1 && grep bar file2")
-[[ "$got" == "$CTX_GUARD_RUN "* ]] && ok "compound command wrapped via generic wrapper" || bad "compound command not wrapped -> $got"
+[[ "$got" == *"| $CTX_GUARD_RUN --filter "* ]] && ok "compound command wrapped via generic wrapper" || bad "compound command not wrapped -> $got"
+# The real command must stay visible to the agent's permission check.
+[[ "$got" == *"grep foo file1 && grep bar file2"* ]] && ok "wrapped command keeps original text verbatim" || bad "original text hidden -> $got"
+[ ! -e "$CTX_GUARD_SCRIPT_DIR" ] && ok "wrapping creates no temp script" || bad "temp script dir created"
 
-[ -d "$CTX_GUARD_SCRIPT_DIR" ] && ok "SCRIPT_DIR created" || bad "SCRIPT_DIR missing"
-if [ -d "$CTX_GUARD_SCRIPT_DIR" ]; then
-  perm=$(mode_of "$CTX_GUARD_SCRIPT_DIR")
-  [ "$perm" = "700" ] && ok "SCRIPT_DIR mode 700" || bad "SCRIPT_DIR mode $perm (want 700)"
-fi
+wrapped=$(rewrite_claude $'echo one; cat <<EOF\ntwo\nEOF\nexit 3')
+out=$(bash -c "$wrapped" 2>&1); st=$?
+[ "$st" = 3 ] && ok "wrapped exit status propagates" || bad "wrapped exit status -> $st"
+[ "$out" = $'one\ntwo' ] && ok "wrapped heredoc output intact" || bad "wrapped heredoc output -> $out"
+wrapped=$(rewrite_claude "true; set -o | grep -q '^pipefail.*on' && echo leaked")
+out=$(bash -c "$wrapped; set -o | grep '^pipefail'" 2>&1)
+[[ "$out" == *off* ]] && ok "pipefail does not leak out of wrapper" || bad "pipefail leaked -> $out"
 
 # Non-bash tools must pass through untouched (no stdout at all).
 out=$(echo '{"tool_name": "view", "tool_input": {"path": "/tmp/x"}}' | python3 "$DIR/hooks/pre_bash_rewrite.py")
@@ -188,7 +193,7 @@ cp "$DIR/bin/ctx-guard-run" "$QUOTED_RUN"
 chmod +x "$QUOTED_RUN"
 quoted=$(CTX_GUARD_RUN="$QUOTED_RUN" rewrite_claude "npm test")
 case "$quoted" in
-  "'$QUOTED_RUN' "*)
+  *"| '$QUOTED_RUN' --filter "*)
     ok "wrapper path is shell-quoted"
     ;;
   *)
@@ -305,7 +310,7 @@ chmod 700 "$RO"
 SL="$SCRATCH/sl"; mkdir -p "$SL/tmp"
 SLS="$SL/run.sh"; echo 'echo sl-ok' > "$SLS"
 sl_run() { # sl_run <extra env assignments...>; clears all stats overrides
-  echo 'echo sl-ok' > "$SLS"  # ctx-guard-run deletes its script after each run
+  echo 'echo sl-ok' > "$SLS"
   env -u CTX_GUARD_STATE_DIR -u CTX_GUARD_STATS_FILE -u XDG_STATE_HOME \
       CTX_GUARD_LOG_DIR="$SL/logs" TMPDIR="$SL/tmp" HOME="$SL/home" "$@" \
       "$CTX_GUARD_RUN" "$SLS" 2>/dev/null

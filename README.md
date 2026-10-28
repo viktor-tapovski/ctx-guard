@@ -195,7 +195,6 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | `CTX_GUARD_MAX_LINES` | 150 | Max lines returned per wrapped command |
 | `CTX_GUARD_WINDOW` | 200000 | Assumed context window for % thresholds (Claude Code only; set 1000000 for 1M-window models) |
 | `CTX_GUARD_LOG_DIR` | /tmp/ctx-guard-\<uid\>/logs | Full-output archive |
-| `CTX_GUARD_SCRIPT_DIR` | /tmp/ctx-guard-\<uid\>/scripts | Temp scripts used to wrap generic commands |
 | `CTX_GUARD_STATE_DIR` | /tmp/ctx-guard-\<uid\>/state | Per-session "already warned" markers; if set, `stats.jsonl` lives here too |
 | `CTX_GUARD_STATS_FILE` | `${XDG_STATE_HOME:-~/.local/state}/ctx-guard/stats.jsonl` | Override the stats log location (wins over `CTX_GUARD_STATE_DIR`) |
 
@@ -213,7 +212,7 @@ Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; e
 
 - **Fails open on Claude Code, fails safe everywhere.** Every hook catches all exceptions and always exits 0 with no output on error, which both Claude Code (fails open) and Copilot CLI (fails closed on crashes) treat as "no action, run normally" — never a silent block.
 - **Nothing lost.** Full output always archived; the model is told the path and instructed to grep it instead of re-running.
-- **Compound commands** (`a && b; c`) are never pattern-rewritten (too risky) — they go through the generic wrapper via a temp script, avoiding all shell-quoting pitfalls.
+- **Compound commands** (`a && b; c`) are never pattern-rewritten (too risky) — they go through the generic wrapper: `(set -o pipefail; { <cmd>\n} 2>&1 | ctx-guard-run --filter …)`. The original command stays verbatim, so the agent's permission check (Copilot CLI ignores a hook's `allow`) sees and matches the real commands, and `ctx-guard-run` only ever filters output. Allow `ctx-guard-run` once (e.g. Copilot `--allow-tool 'shell(ctx-guard-run)'`) and wrapped commands prompt exactly as they would unwrapped.
 - **Per-user runtime directory.** Logs/scripts/state live under `/tmp/ctx-guard-<uid>/`, created mode `700`, rather than a shared `/tmp/ctx-guard/` — a single predictable, world-readable path would let other local users on a multi-user host read archived command output (potentially including secrets) or race to control the directory before ctx-guard's first run. `install.sh` deletes the old shared path if present.
 - **Credential-aware output handling.** Environment enumeration (`env`, `printenv`, `set`, and `export`) is denied. Common credential patterns are redacted before logs are retained or returned to the model. Pattern-based redaction cannot identify every secret, so do not treat ctx-guard as a guarantee that arbitrary sensitive data is safe to disclose.
 - Requires a Claude Code version supporting `updatedInput` in `PreToolUse` hooks. On older versions the rewriter is silently inert, but the CLAUDE.md rules and subagents still provide most of the benefit.

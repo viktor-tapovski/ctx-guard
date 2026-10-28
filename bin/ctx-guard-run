@@ -5,6 +5,10 @@
 # `ctx-guard-stats` can report actual (not estimated) token savings.
 #
 # Usage: ctx-guard-run <script-file> [agent]
+#        <cmd> 2>&1 | ctx-guard-run --filter [agent] [program-name]
+#   Filter mode caps/archives stdin instead of running anything, so the agent's
+#   permission prompt shows the real command and only it is subject to approval.
+#   The exit status is the caller's (pipefail); filter mode itself exits 0.
 # Env:   CTX_GUARD_MAX_LINES          (default 150)  max lines returned to context
 #        CTX_GUARD_LOG_DIR            (default /tmp/ctx-guard-<uid>/logs; falls
 #                                     back to $TMPDIR when that is not writable)
@@ -23,8 +27,24 @@ LOG_DIR="${CTX_GUARD_LOG_DIR:-$DEFAULT_ROOT/logs}"
 RETENTION_DAYS="${CTX_GUARD_LOG_RETENTION_DAYS:-7}"
 REDACT_LOGS="${CTX_GUARD_REDACT_LOGS:-1}"
 STATE_DIR="${CTX_GUARD_STATE_DIR:-$DEFAULT_ROOT/state}"
-SCRIPT="$1"
-AGENT="${2:-${CTX_GUARD_AGENT:-unknown}}"
+# SCRIPT is never deleted here: the agent may re-run the same wrapped command
+# (e.g. retry outside the sandbox after a permission prompt). The context_monitor
+# hook prunes stale scripts by age.
+FILTER=0
+PROGRAM=""
+if [ "${1:-}" = "--filter" ]; then
+  FILTER=1
+  SCRIPT=""
+  AGENT="${2:-${CTX_GUARD_AGENT:-unknown}}"
+  PROGRAM="${3:-}"
+else
+  SCRIPT="$1"
+  AGENT="${2:-${CTX_GUARD_AGENT:-unknown}}"
+fi
+
+run_input() {
+  if [ "$FILTER" = 1 ]; then cat; else bash "$SCRIPT"; fi
+}
 
 usable_dir() {
   local dir="$1" probe
@@ -41,10 +61,8 @@ if ! usable_dir "$LOG_DIR"; then
   if ! usable_dir "$LOG_DIR"; then
     # Nowhere to archive output: run uncapped rather than failing the command.
     echo "ctx-guard: no writable log dir, running without output capping" >&2
-    bash "$SCRIPT"
-    STATUS=$?
-    rm -f "$SCRIPT"
-    exit $STATUS
+    run_input
+    exit $?
   fi
 fi
 
@@ -79,7 +97,7 @@ find "$LOG_DIR" -maxdepth 1 -name 'run-*' -mtime "+${RETENTION_DAYS}" -delete 2>
 RAW_LOG="$(mktemp "$LOG_DIR/raw-XXXXXXXX")"
 
 START_MS="$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || echo "")"
-bash "$SCRIPT" >"$RAW_LOG" 2>&1
+run_input >"$RAW_LOG" 2>&1
 STATUS=$?
 END_MS="$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || echo "")"
 
@@ -147,9 +165,10 @@ chmod 600 "$LOG"
 log_stats() {
   local returned_bytes="$1" compressed="$2"
   python3 - "$STATS_FILE" "$AGENT" "$ORIG_BYTES" "$returned_bytes" "$compressed" "$STATUS" \
-    "$SCRIPT" "$START_MS" "$END_MS" <<'PY' 2>/dev/null || true
+    "$SCRIPT" "$START_MS" "$END_MS" "$FILTER" "$PROGRAM" <<'PY' 2>/dev/null || true
 import json, os, re, shlex, sys, time
-stats_file, agent, orig, returned, compressed, status, script, start_ms, end_ms = sys.argv[1:10]
+(stats_file, agent, orig, returned, compressed, status, script, start_ms, end_ms,
+ filter_mode, program) = sys.argv[1:12]
 
 WRAPPERS = {"sudo", "env", "time", "command", "nice"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -201,12 +220,13 @@ event = {
     "ts": time.time(),
     "kind": "ctx_guard_run",
     "agent": agent,
-    "command": program_name(script),
+    "command": (program if NAME.match(program) else "(unknown)") if filter_mode == "1"
+               else program_name(script),
     "duration_ms": duration_ms,
     "original_bytes": int(orig),
     "returned_bytes": int(returned),
     "compressed": bool(int(compressed)),
-    "exit_status": int(status),
+    "exit_status": None if filter_mode == "1" else int(status),
 }
 fd = os.open(stats_file, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
 os.write(fd, (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8"))
@@ -217,14 +237,17 @@ PY
 if [ "$TOTAL" -le "$MAX_LINES" ]; then
   cat "$LOG"
   log_stats "$ORIG_BYTES" 0
-  rm -f "$SCRIPT"
   exit $STATUS
 fi
 
 # --- Compressed view: errors first, then head + tail ---
 OUT="$(mktemp "$LOG_DIR/out-XXXXXXXX")"
 {
-  echo "=== ctx-guard: output compressed ($TOTAL lines -> summary, exit=$STATUS) ==="
+  if [ "$FILTER" = 1 ]; then
+    echo "=== ctx-guard: output compressed ($TOTAL lines -> summary) ==="
+  else
+    echo "=== ctx-guard: output compressed ($TOTAL lines -> summary, exit=$STATUS) ==="
+  fi
 
   ERR_LINES=$(grep -inE '\b(error|fail|failed|failure|fatal|exception|panic|traceback|warning|assert)\b' "$LOG" | head -40)
   if [ -n "$ERR_LINES" ]; then
@@ -245,5 +268,5 @@ OUT="$(mktemp "$LOG_DIR/out-XXXXXXXX")"
 cat "$OUT"
 RETURNED_BYTES=$(wc -c < "$OUT" | tr -d ' ')
 log_stats "$RETURNED_BYTES" 1
-rm -f "$OUT" "$SCRIPT"
+rm -f "$OUT"
 exit $STATUS
