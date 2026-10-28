@@ -5,6 +5,14 @@
 # CTX_GUARD_AGENT so `ctx-guard-stats` can break down savings per tool.
 set -euo pipefail
 
+STATUSLINE=0
+for arg in "$@"; do
+  case "$arg" in
+    --statusline) STATUSLINE=1 ;;
+    *) echo "Unknown option: $arg (supported: --statusline)" >&2; exit 2 ;;
+  esac
+done
+
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/.ctx-guard"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
@@ -29,11 +37,11 @@ rm -rf /tmp/ctx-guard 2>/dev/null || true
 # versions, now superseded by the shared $DEST above.
 rm -rf "$HOME/.claude/ctx-guard" 2>/dev/null || true
 
-cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
+cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
 cp "$SRC"/hooks/*.py                   "$DEST/hooks/"
 cp "$SRC"/hooks/lib/*.py               "$DEST/hooks/lib/"
 cp "$SRC"/hooks/lib/popular_packages/*.txt "$DEST/hooks/lib/popular_packages/"
-chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
+chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
 
 python3 - "$SRC" "$DEST" "$HOME/.claude/agents" "$MANIFEST" <<'PYEOF'
 import glob
@@ -262,6 +270,60 @@ os.chmod(temporary, 0o600)
 os.replace(temporary, manifest_path)
 PYEOF
 
+# --- Opt-in status line segment (--statusline) ---
+# Each config's existing statusLine is recorded in the manifest and chained by
+# ctx-guard-statusline, so the user's own status line keeps showing; uninstall
+# puts it back. Re-running the install never records our own command as theirs.
+if [ "$STATUSLINE" = 1 ]; then
+python3 - "$MANIFEST" "$DEST" "$CLAUDE_SETTINGS" "$HOME/.copilot/settings.json" "$PYTHON_BIN" << 'PYEOF'
+import json, os, shlex, shutil, sys
+
+manifest_path, dest, claude_settings, copilot_settings, python_bin = sys.argv[1:6]
+with open(manifest_path, encoding="utf-8") as f:
+    manifest = json.load(f)
+statusline = manifest.setdefault("statusline", {})
+script = os.path.join(dest, "bin", "ctx-guard-statusline")
+
+for agent, path in (("claude-code", claude_settings), ("copilot-cli", copilot_settings)):
+    settings = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                settings = json.load(f)
+        except ValueError:
+            print(f"Skipping status line for {agent}: {path} is not plain JSON")
+            continue
+        if agent == "copilot-cli":  # settings.json.bak already holds Claude's original
+            shutil.copy(path, path + ".bak")
+    command = f"{shlex.quote(python_bin)} {shlex.quote(script)} {agent}"
+    current = settings.get("statusLine")
+    entry = statusline.get(agent, {})
+    ours = isinstance(current, dict) and script in str(current.get("command", ""))
+    if not ours:
+        entry["previous"] = current
+    line = {"type": "command", "command": command}
+    previous = entry.get("previous")
+    if isinstance(previous, dict) and "padding" in previous:
+        line["padding"] = previous["padding"]
+    settings["statusLine"] = line
+    entry.update(settings_file=path, command=command)
+    statusline[agent] = entry
+
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    temporary = path + ".ctx-guard.tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(temporary, path)
+    print(f"{agent} status line set in {path}")
+
+temporary = manifest_path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2)
+os.chmod(temporary, 0o600)
+os.replace(temporary, manifest_path)
+PYEOF
+fi
+
 echo ""
 echo "Done."
 echo "Claude Code: restart it, then verify with: /hooks and /agents"
@@ -269,6 +331,7 @@ echo "Copilot CLI: restart it, then verify with: /env (look for ctx-guard.json u
 echo ""
 echo "Check savings any time with: ctx-guard-stats"
 echo "Uninstall any time with:     ctx-guard-uninstall"
+[ "$STATUSLINE" = 1 ] || echo "Optional live savings in the status line: ./install.sh --statusline"
 echo "(or the full paths: $DEST/bin/ctx-guard-stats, $DEST/bin/ctx-guard-uninstall)"
 echo "Tune via env vars: CTX_GUARD_MAX_LINES (default 150), CTX_GUARD_WINDOW (default 200000),"
 echo "CTX_GUARD_LOG_RETENTION_DAYS (default 7). Runtime state lives under $RUN_DIR."

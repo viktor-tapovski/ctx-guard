@@ -171,6 +171,30 @@ are skipped, and `(unknown)` is logged if it cannot be parsed) and
 `duration_ms`. Arguments and paths are never logged. Events written by older
 versions have neither field and group under `(unknown)` with zero time.
 
+### Status line (optional)
+
+```bash
+bash install.sh --statusline
+```
+
+Adds a live savings segment to the Claude Code and Copilot CLI status lines,
+for the agent you are in:
+
+```
+ctx-guard ⬇ today 12.4k (~3.1k) · total 1.2M (~240k)
+```
+
+Tokens (bytes/4). Plain numbers are MEASURED, `(~…)` ESTIMATED; "today" is
+since local midnight. It sets `statusLine` in `~/.claude/settings.json` and
+`~/.copilot/settings.json` to `ctx-guard-statusline <agent>`; a status line you
+already had is recorded in the install manifest, run first with the same
+stdin, and the segment is appended after ` │ `. `ctx-guard-uninstall` restores
+the original (or removes ours) unless you changed it since. To stay fast on
+every refresh it keeps an incremental rollup, `stats.rollup.json`, next to
+`stats.jsonl` (mode `600`, rebuilt if the log is replaced or truncated), and it
+does not drain sandbox spools, so it can trail `ctx-guard-stats` by one tool
+call. With no stats or no savings yet the segment is empty.
+
 All stats are per-agent (`claude-code` / `copilot-cli`), recorded to `${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard/stats.jsonl` (persistent across reboots; dir mode `700`), one JSON object per line, mode `600`. If that dir is not writable, writers fall back to `/tmp/ctx-guard-<uid>/state/stats.jsonl`. `ctx-guard-uninstall` leaves this file in place.
 
 ## How cross-tool compatibility works
@@ -212,7 +236,7 @@ Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; e
 
 - **Fails open on Claude Code, fails safe everywhere.** Every hook catches all exceptions and always exits 0 with no output on error, which both Claude Code (fails open) and Copilot CLI (fails closed on crashes) treat as "no action, run normally" — never a silent block.
 - **Nothing lost.** Full output always archived; the model is told the path and instructed to grep it instead of re-running.
-- **Compound commands** (`a && b; c`) are never pattern-rewritten (too risky) — they go through the generic wrapper: `(set -o pipefail; { <cmd>\n} 2>&1 | ctx-guard-run --filter …)`. The original command stays verbatim, so the agent's permission check (Copilot CLI ignores a hook's `allow`) sees and matches the real commands, and `ctx-guard-run` only ever filters output. Allow `ctx-guard-run` once (e.g. Copilot `--allow-tool 'shell(ctx-guard-run)'`) and wrapped commands prompt exactly as they would unwrapped.
+- **Compound commands** (`a && b; c`) are never pattern-rewritten (too risky) — they go through the generic wrapper: `(set -o pipefail; { <cmd>\n} 2>&1 | ctx-guard-run --filter …)`. The original command stays verbatim, so the agent's permission check (Copilot CLI ignores a hook's `allow`) sees and matches the real commands, and `ctx-guard-run` only ever filters output. In Copilot CLI 1.0.105 (`copilot -p`) wrapped commands needed only the allows the original command needs; no extra allow for `ctx-guard-run`. If an interactive session ever prompts for it, allow it once (`--allow-tool 'shell(ctx-guard-run)'`).
 - **Per-user runtime directory.** Logs/scripts/state live under `/tmp/ctx-guard-<uid>/`, created mode `700`, rather than a shared `/tmp/ctx-guard/` — a single predictable, world-readable path would let other local users on a multi-user host read archived command output (potentially including secrets) or race to control the directory before ctx-guard's first run. `install.sh` deletes the old shared path if present.
 - **Credential-aware output handling.** Environment enumeration (`env`, `printenv`, `set`, and `export`) is denied. Common credential patterns are redacted before logs are retained or returned to the model. Pattern-based redaction cannot identify every secret, so do not treat ctx-guard as a guarantee that arbitrary sensitive data is safe to disclose.
 - Requires a Claude Code version supporting `updatedInput` in `PreToolUse` hooks. On older versions the rewriter is silently inert, but the CLAUDE.md rules and subagents still provide most of the benefit.

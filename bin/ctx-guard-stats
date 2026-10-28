@@ -470,6 +470,10 @@ def main() -> None:
         if os.path.isfile(args.stats_file):
             os.remove(args.stats_file)
             print(f"Deleted {args.stats_file}")
+            # ctx-guard-statusline's cache: a new file could reuse the inode.
+            rollup = os.path.splitext(args.stats_file)[0] + ".rollup.json"
+            if os.path.isfile(rollup):
+                os.remove(rollup)
         else:
             print("No stats file to delete.")
         return

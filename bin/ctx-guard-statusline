@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""
+ctx-guard-statusline <agent>: one status-line segment with the current agent's
+token savings, for Claude Code and Copilot CLI (`./install.sh --statusline`).
+
+  ctx-guard ⬇ today 12.4k (~3.1k) · total 1.2M (~240k)
+
+Plain numbers are MEASURED savings, `(~...)` are ESTIMATED ones (same split as
+ctx-guard-stats). "today" is since local midnight, by each event's own ts.
+
+The status line runs after every assistant message, so it never rescans
+stats.jsonl: an incremental rollup (stats.rollup.json, next to it) keeps the
+totals plus the byte offset read so far. It also never drains sandbox spools,
+so it can lag one tool call behind ctx-guard-stats.
+
+A status line the user had before install is recorded in the install manifest
+and run first (same stdin); this segment is appended after ` │ `. Any failure
+here prints nothing of ours, so the user's own status line still shows.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+ROLLUP_VERSION = 1
+CHAIN_TIMEOUT_S = 5
+
+
+def stats_file() -> str:
+    # Same rule as ctx-guard-stats: STATS_FILE > STATE_DIR > XDG default > legacy.
+    if os.environ.get("CTX_GUARD_STATS_FILE"):
+        return os.environ["CTX_GUARD_STATS_FILE"]
+    if os.environ.get("CTX_GUARD_STATE_DIR"):
+        return os.path.join(os.environ["CTX_GUARD_STATE_DIR"], "stats.jsonl")
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    path = os.path.join(base, "ctx-guard", "stats.jsonl")
+    legacy = os.path.join(
+        os.environ.get("CTX_GUARD_RUNTIME_ROOT") or f"/tmp/ctx-guard-{os.getuid()}",
+        "state",
+        "stats.jsonl",
+    )
+    return legacy if not os.path.exists(path) and os.path.exists(legacy) else path
+
+
+def event_savings(ev: dict) -> tuple[int, int]:
+    """(measured, estimated) saved bytes, counted exactly as ctx-guard-stats does."""
+    kind = ev.get("kind")
+    if kind == "ctx_guard_run":
+        return max(0, ev.get("original_bytes", 0) - ev.get("returned_bytes", 0)), 0
+    if kind == "rewrite":
+        return ev.get("saved_bytes", 0), 0
+    if kind == "rewrite_estimate":
+        return 0, ev.get("est_saved_bytes", 0)
+    return 0, 0
+
+
+def empty_rollup(st: os.stat_result, day: str) -> dict:
+    return {"version": ROLLUP_VERSION, "dev": st.st_dev, "ino": st.st_ino,
+            "offset": 0, "day": day, "agents": {}}
+
+
+def update_rollup(path: str, rollup_path: str) -> dict:
+    st = os.stat(path)
+    day = time.strftime("%Y-%m-%d")
+    try:
+        with open(rollup_path, encoding="utf-8") as f:
+            rollup = json.load(f)
+    except (OSError, ValueError):
+        rollup = None
+    # Rebuild when the stats file was replaced (--reset, rotation) or truncated.
+    if (not isinstance(rollup, dict) or rollup.get("version") != ROLLUP_VERSION
+            or rollup.get("dev") != st.st_dev or rollup.get("ino") != st.st_ino
+            or rollup.get("offset", 0) > st.st_size):
+        rollup = empty_rollup(st, day)
+    if rollup["day"] != day:
+        for totals in rollup["agents"].values():
+            totals["today"] = [0, 0]
+        rollup["day"] = day
+
+    if rollup["offset"] == st.st_size:
+        return rollup
+    with open(path, "rb") as f:
+        f.seek(rollup["offset"])
+        chunk = f.read(st.st_size - rollup["offset"])
+    # Only complete lines: a writer may be mid-append on the last one.
+    end = chunk.rfind(b"\n") + 1
+    for line in chunk[:end].splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        # A malformed event must not raise: the offset would never advance past it.
+        try:
+            measured, estimated = (int(n) for n in event_savings(ev))
+            if not measured and not estimated:
+                continue
+            today = time.strftime("%Y-%m-%d", time.localtime(float(ev.get("ts", 0)))) == day
+            agent = str(ev.get("agent", "unknown"))
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            continue
+        totals = rollup["agents"].setdefault(agent, {"today": [0, 0], "total": [0, 0]})
+        totals["total"][0] += measured
+        totals["total"][1] += estimated
+        if today:
+            totals["today"][0] += measured
+            totals["today"][1] += estimated
+    rollup["offset"] += end
+
+    temporary = f"{rollup_path}.{os.getpid()}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(rollup, f)
+    os.replace(temporary, rollup_path)
+    return rollup
+
+
+def fmt_tokens(saved_bytes: float) -> str:
+    n = saved_bytes / 4
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:.0f}"
+
+
+def pair(measured: int, estimated: int) -> str:
+    text = fmt_tokens(measured)
+    return f"{text} (~{fmt_tokens(estimated)})" if estimated else text
+
+
+def segment(agent: str) -> str:
+    path = stats_file()
+    if not os.path.isfile(path):
+        return ""
+    rollup = update_rollup(path, os.path.splitext(path)[0] + ".rollup.json")
+    totals = rollup["agents"].get(agent)
+    if not totals or not any(totals["total"]):
+        return ""
+    return (f"ctx-guard ⬇ today {pair(*totals['today'])}"
+            f" · total {pair(*totals['total'])}")
+
+
+def chained_command(agent: str) -> str | None:
+    manifest = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..",
+                            "install-manifest.json")
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            entry = json.load(f)["statusline"][agent]
+        return (entry.get("previous") or {}).get("command") or None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def main() -> None:
+    agent = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CTX_GUARD_AGENT", "unknown")
+    chained = ""
+    command = chained_command(agent)
+    if command:
+        # stdin is only read for the chained command: an unchained run never
+        # blocks on a host that leaves it open.
+        try:
+            payload = b"" if sys.stdin.isatty() else sys.stdin.buffer.read()
+            result = subprocess.run(["/bin/sh", "-c", command], input=payload,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=CHAIN_TIMEOUT_S)
+            chained = result.stdout.decode("utf-8", "replace").rstrip("\n")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    try:
+        ours = segment(agent)
+    except Exception:
+        ours = ""
+
+    out = " │ ".join(part for part in (chained, ours) if part)
+    if out:
+        sys.stdout.buffer.write((out + "\n").encode("utf-8"))
+
+
+if __name__ == "__main__":
+    main()

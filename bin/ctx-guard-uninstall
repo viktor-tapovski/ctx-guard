@@ -89,6 +89,31 @@ def remove_copilot_hooks(manifest: dict) -> None:
     print(f"Removed {path}")
 
 
+def restore_statuslines(manifest: dict) -> None:
+    for agent, entry in manifest.get("statusline", {}).items():
+        path = Path(entry["settings_file"])
+        if not path.is_file():
+            continue
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            print(f"Preserving unreadable {agent} settings: {path}")
+            continue
+        current = settings.get("statusLine")
+        if not isinstance(current, dict) or current.get("command") != entry.get("command"):
+            print(f"Preserving changed {agent} status line in {path}")
+            continue
+        if entry.get("previous"):
+            settings["statusLine"] = entry["previous"]
+        else:
+            settings.pop("statusLine")
+        temporary = path.with_suffix(path.suffix + ".ctx-guard.tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(settings, stream, indent=2)
+        os.replace(temporary, path)
+        print(f"Restored {agent} status line in {path}")
+
+
 def restore_agents(manifest: dict) -> None:
     for entry in manifest.get("agents", {}).values():
         path = Path(entry["path"])
@@ -158,6 +183,7 @@ def main() -> None:
 
     remove_claude_hooks(manifest)
     remove_copilot_hooks(manifest)
+    restore_statuslines(manifest)
     restore_agents(manifest)
     remove_links(manifest)
     remove_rules(manifest)
