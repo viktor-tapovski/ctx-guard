@@ -21,6 +21,8 @@ jobs:
         run: python3 -m py_compile hooks/*.py hooks/lib/*.py bin/ctx-guard-stats bin/ctx-guard-uninstall
       - name: Run smoke tests
         run: bash tests/smoke.sh
+      - name: Run Python tests (offline; registry lookups are stubbed)
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
 
   # Both strings matter and they are not the same string: commitlint checks the
   # branch history, the title check covers the squash subject that actually
