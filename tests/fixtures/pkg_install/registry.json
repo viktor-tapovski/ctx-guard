@@ -1,0 +1,29 @@
+{
+  "_comment": "Stubbed registry snapshot for tests/test_pkg_install_fixtures.py. Maps ecosystem -> package name -> age in days, as registry_lookup would report it. A name that is absent does not exist (registry 404). Typosquat entries marked here are names the fixture treats as attacker-registered; their ages are illustrative, not real registry data.",
+  "npm": {
+    "react": 900, "react-dom": 900, "typescript": 400, "@types/node": 30, "express": 1200,
+    "vitest": 60, "axios": 200, "zod": 120, "pnpm": 45, "lodash": 1500,
+    "@tanstack/react-query": 40, "eslint": 90, "prettier": 75, "preact": 110, "bcryptjs": 700,
+    "hono": 20, "dotenv": 150, "cors": 1900, "helmet": 300, "globby": 400,
+    "next": 25, "chalk": 500, "jest": 300,
+    "loadsh": 900, "expresss": 3, "mongose": 2500, "jquerry": 2400, "babelcore": 2600
+  },
+  "pip": {
+    "requests": 160, "fastapi": 30, "uvicorn": 45, "numpy": 70, "pandas": 90,
+    "pip": 40, "httpx": 200, "black": 120, "typing-extensions": 150, "scapy": 500,
+    "pydantic": 60, "sqlalchemy": 80, "django": 50, "numba": 100, "psycopg": 140,
+    "ruff": 12, "pytest": 110, "pytest-cov": 170, "pyyaml": 400,
+    "urlib3": 1800, "python3-dateutil": 2100, "crytography": 5, "scikitlearn": 700,
+    "reqests": 1300
+  },
+  "cargo": {
+    "serde": 2900, "tokio": 2700, "ripgrep": 2600, "cargo-watch": 2000, "serde-json": 2900,
+    "fd-find": 2300, "thiserror": 2100, "anyhow": 2000,
+    "tokoi": 2, "reqwests": 600, "rnad": 800
+  },
+  "gem": {
+    "rails": 5000, "bundler": 5000, "nokogiri": 5000, "rubocop": 3500, "pg": 5000,
+    "faker": 4000, "sassc": 2500, "sinatra": 5000,
+    "raills": 1500, "rais": 1200, "sidekik": 300, "httpary": 900
+  }
+}

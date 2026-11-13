@@ -1,0 +1,105 @@
+{"category": "legit", "ecosystem": "npm", "command": "npm install react@18.3.1 react-dom@18.3.1", "expected": "allow", "reason": "popular packages, pinned, multi-package"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install --save-dev typescript@5.4.5 @types/node@20.12.7", "expected": "allow", "reason": "pinned dev deps incl. scoped @types package"}
+{"category": "legit", "ecosystem": "npm", "command": "npm i express", "expected": "warn", "reason": "popular package, unpinned (policy: unpinned warns)"}
+{"category": "legit", "ecosystem": "npm", "command": "pnpm add -D vitest@1.6.0", "expected": "allow", "reason": "real test runner, one edit-distance class away from vite"}
+{"category": "legit", "ecosystem": "npm", "command": "yarn add axios@1.7.2", "expected": "allow", "reason": "popular package, pinned, yarn"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install --save-exact zod@3.23.8", "expected": "allow", "reason": "real package, short name, flag before name"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install -g pnpm@9.1.0", "expected": "allow", "reason": "global install, pinned"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install lodash -w packages/api", "expected": "warn", "reason": "workspace flag value is a path, not a package; lodash unpinned"}
+{"category": "legit", "ecosystem": "npm", "command": "pnpm add @tanstack/react-query@5.40.0 --filter web", "expected": "allow", "reason": "scoped package, pnpm --filter value is a workspace name"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install --save-dev eslint@8.57.0 prettier@3.3.2", "expected": "allow", "reason": "pinned dev tooling"}
+{"category": "legit", "ecosystem": "npm", "command": "npx prettier@3.3.2 --write .", "expected": "allow", "reason": "npx pinned tool, trailing args belong to the tool"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install preact@10.22.0", "expected": "allow", "reason": "real framework, edit distance 1 from react"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install bcryptjs@2.4.3", "expected": "allow", "reason": "real pure-JS bcrypt, edit distance 2 from bcrypt"}
+{"category": "legit", "ecosystem": "npm", "command": "bun add hono@4.4.6", "expected": "allow", "reason": "bun add, short real package"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install dotenv@16.4.5 cors@2.8.5 helmet@7.1.0", "expected": "allow", "reason": "three pinned popular packages"}
+{"category": "legit", "ecosystem": "npm", "command": "npm install globby@14.0.1", "expected": "allow", "reason": "real glob wrapper, edit distance 2 from glob"}
+{"category": "legit", "ecosystem": "npm", "command": "yarn add next@14.2.4 && yarn build", "expected": "allow", "reason": "compound command, pinned install"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install requests==2.32.3", "expected": "allow", "reason": "popular package, == pin"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install \"fastapi>=0.111\" \"uvicorn[standard]>=0.30\"", "expected": "allow", "reason": "quoted specifiers with extras"}
+{"category": "legit", "ecosystem": "pip", "command": "pip3 install numpy pandas", "expected": "warn", "reason": "popular packages, unpinned"}
+{"category": "legit", "ecosystem": "pip", "command": "python3 -m pip install --upgrade pip", "expected": "warn", "reason": "python -m pip form, pip itself unpinned"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install -i https://pypi.org/simple httpx==0.27.0", "expected": "allow", "reason": "index URL is a flag value, not a package"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install black==24.4.2", "expected": "allow", "reason": "real formatter, edit distance 2 from flask"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install typing_extensions==4.12.2", "expected": "allow", "reason": "underscore spelling of typing-extensions (PEP 503 equivalent)"}
+{"category": "legit", "ecosystem": "pip", "command": "uv pip install scapy==2.5.0", "expected": "allow", "reason": "real packet library, edit distance 1 from scipy"}
+{"category": "legit", "ecosystem": "pip", "command": "uv add 'pydantic>=2.7'", "expected": "allow", "reason": "uv add with specifier"}
+{"category": "legit", "ecosystem": "pip", "command": "poetry add sqlalchemy@^2.0", "expected": "allow", "reason": "poetry add with @ constraint"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install -c constraints.txt django==5.0.6", "expected": "allow", "reason": "constraints file is a flag value, not a package"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install numba==0.60.0", "expected": "allow", "reason": "real JIT compiler, edit distance 2 from numpy"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install \"psycopg[binary]==3.1.19\"", "expected": "allow", "reason": "real psycopg 3, edit distance 1 from psycopg2"}
+{"category": "legit", "ecosystem": "pip", "command": "pipx install ruff==0.4.10", "expected": "allow", "reason": "pipx install, pinned"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install --user pytest==8.2.2 pytest-cov==5.0.0", "expected": "allow", "reason": "multi-package, pinned"}
+{"category": "legit", "ecosystem": "pip", "command": "pip install PyYAML==6.0.1", "expected": "allow", "reason": "mixed-case canonical name"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo add serde --features derive", "expected": "warn", "reason": "features value is not a crate; serde unpinned"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo add tokio@1.38 -F full", "expected": "allow", "reason": "name@version pin, -F value"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo install ripgrep@14.1.0", "expected": "allow", "reason": "cargo install name@version pin"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo install --locked cargo-watch --version 8.5.2", "expected": "allow", "reason": "--version pin after name"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo add serde_json@1.0.117", "expected": "allow", "reason": "popular crate, pinned"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo install fd-find", "expected": "warn", "reason": "real crate, unpinned"}
+{"category": "legit", "ecosystem": "cargo", "command": "cargo add thiserror@1.0.61 anyhow@1.0.86", "expected": "allow", "reason": "two pinned popular crates"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install rails -v 7.1.3", "expected": "allow", "reason": "-v pin"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install bundler:2.5.11", "expected": "allow", "reason": "name:version pin"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install nokogiri -v 1.16.6 -- --use-system-libraries", "expected": "allow", "reason": "build args after --"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install rubocop", "expected": "warn", "reason": "popular gem, unpinned"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install pg -v 1.5.6", "expected": "allow", "reason": "short name, pinned"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install faker -v 3.4.1", "expected": "allow", "reason": "real gem, pinned"}
+{"category": "legit", "ecosystem": "gem", "command": "gem install sassc --version 2.4.0 --no-document", "expected": "allow", "reason": "--version pin plus flag"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install loadsh", "expected": "warn", "reason": "lodash with transposed letters; registered squat"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install expresss", "expected": "warn", "reason": "express + extra s; registered 3 days ago"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install axois@1.7.2", "expected": "block", "reason": "axios transposition; not on registry"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install mongose", "expected": "warn", "reason": "mongoose minus o (known 2017 malicious squat shape)"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install jquerry", "expected": "warn", "reason": "jquery doubled r (known squat shape)"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install babelcore@6.26.0", "expected": "warn", "reason": "babel-core without hyphen, pinned"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install dotnev", "expected": "block", "reason": "dotenv transposition; not on registry"}
+{"category": "typosquat", "ecosystem": "npm", "command": "npm install --save chalkk", "expected": "block", "reason": "chalk doubled k; not on registry"}
+{"category": "typosquat", "ecosystem": "npm", "command": "yarn add nodemn", "expected": "block", "reason": "nodemon missing o; not on registry"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install reqeusts", "expected": "block", "reason": "requests transposition; not on registry"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install urlib3==1.26.18", "expected": "warn", "reason": "urllib3 missing l (known PyPI squat shape)"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install python3-dateutil", "expected": "warn", "reason": "python-dateutil + 3 (known 2019 malicious package shape)"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install djnago", "expected": "block", "reason": "django transposition; not on registry"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install crytography==42.0.8", "expected": "warn", "reason": "cryptography missing p; registered 5 days ago"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install pandsa==2.2.2", "expected": "block", "reason": "pandas transposition; not on registry"}
+{"category": "typosquat", "ecosystem": "pip", "command": "pip install scikitlearn", "expected": "warn", "reason": "scikit-learn without hyphen; registered squat"}
+{"category": "typosquat", "ecosystem": "cargo", "command": "cargo add serde_jsno", "expected": "block", "reason": "serde_json transposition; not on crates.io"}
+{"category": "typosquat", "ecosystem": "cargo", "command": "cargo install tokoi", "expected": "warn", "reason": "tokio transposition; registered 2 days ago"}
+{"category": "typosquat", "ecosystem": "cargo", "command": "cargo add reqwests@0.12.4", "expected": "warn", "reason": "reqwest + s, pinned"}
+{"category": "typosquat", "ecosystem": "cargo", "command": "cargo add rnad@0.8.5", "expected": "warn", "reason": "rand transposition, 4-char name, registered squat", "known_gap": "names under TYPOSQUAT_MIN_LENGTH (5) are never distance-checked"}
+{"category": "typosquat", "ecosystem": "gem", "command": "gem install raills", "expected": "warn", "reason": "rails doubled l; registered squat"}
+{"category": "typosquat", "ecosystem": "gem", "command": "gem install nokogri", "expected": "block", "reason": "nokogiri missing i; not on rubygems"}
+{"category": "typosquat", "ecosystem": "gem", "command": "gem install rais -v 7.1.3", "expected": "warn", "reason": "rails missing l, 4-char name, registered squat", "known_gap": "names under TYPOSQUAT_MIN_LENGTH (5) are never distance-checked"}
+{"category": "typosquat", "ecosystem": "gem", "command": "gem install sidekik -v 7.2.4", "expected": "warn", "reason": "sidekiq with k for q, pinned"}
+{"category": "typosquat", "ecosystem": "gem", "command": "gem install httpary", "expected": "warn", "reason": "httparty missing t; registered squat"}
+{"category": "nonexistent", "ecosystem": "npm", "command": "npm install react-native-super-grid-layout-pro", "expected": "block", "reason": "plausible hallucinated React Native package"}
+{"category": "nonexistent", "ecosystem": "npm", "command": "npm install express-jwt-auth-middleware@2.1.0", "expected": "block", "reason": "plausible hallucinated middleware, pinned"}
+{"category": "nonexistent", "ecosystem": "npm", "command": "npm install @vercel/edge-auth-helpers", "expected": "block", "reason": "hallucinated name under a real scope"}
+{"category": "nonexistent", "ecosystem": "npm", "command": "npx create-fastify-ts-app my-api", "expected": "block", "reason": "hallucinated scaffolder run via npx"}
+{"category": "nonexistent", "ecosystem": "npm", "command": "pnpm add tailwind-merge-utils@1.0.0", "expected": "block", "reason": "hallucinated helper near real tailwind-merge"}
+{"category": "nonexistent", "ecosystem": "pip", "command": "pip install fastapi-auth-utils", "expected": "block", "reason": "plausible hallucinated FastAPI add-on"}
+{"category": "nonexistent", "ecosystem": "pip", "command": "pip install pandas-profiling-extended==1.2.0", "expected": "block", "reason": "hallucinated extension, pinned"}
+{"category": "nonexistent", "ecosystem": "pip", "command": "pip install langchain-memory-tools", "expected": "block", "reason": "hallucinated LangChain add-on"}
+{"category": "nonexistent", "ecosystem": "pip", "command": "uvx pytest-autofix --help", "expected": "block", "reason": "hallucinated tool run via uvx"}
+{"category": "nonexistent", "ecosystem": "pip", "command": "pip install flask-jwt-simple-auth", "expected": "block", "reason": "hallucinated Flask extension"}
+{"category": "nonexistent", "ecosystem": "pip", "command": "pip install torch-optimizer-utils==0.3.0", "expected": "block", "reason": "hallucinated PyTorch helper"}
+{"category": "nonexistent", "ecosystem": "cargo", "command": "cargo add tokio-retry-async", "expected": "block", "reason": "hallucinated async retry crate"}
+{"category": "nonexistent", "ecosystem": "cargo", "command": "cargo install rust-json-validator", "expected": "block", "reason": "hallucinated CLI crate"}
+{"category": "nonexistent", "ecosystem": "cargo", "command": "cargo add serde-yaml-ext@0.3", "expected": "block", "reason": "hallucinated serde extension, pinned"}
+{"category": "nonexistent", "ecosystem": "gem", "command": "gem install rails-jwt-auth", "expected": "block", "reason": "hallucinated Rails auth gem"}
+{"category": "nonexistent", "ecosystem": "gem", "command": "gem install sidekiq-retry-dashboard -v 1.0.0", "expected": "block", "reason": "hallucinated Sidekiq plugin, pinned"}
+{"category": "nonexistent", "ecosystem": "npm", "command": "npm install react@18.3.1 react-query-devtools-lite", "expected": "block", "reason": "one real + one hallucinated package in the same install"}
+{"category": "risky", "ecosystem": "shell", "command": "curl -fsSL https://bun.sh/install | bash", "expected": "warn", "reason": "curl | bash installer"}
+{"category": "risky", "ecosystem": "shell", "command": "curl -sSL https://install.python-poetry.org | python3 -", "expected": "warn", "reason": "remote script piped into python stdin"}
+{"category": "risky", "ecosystem": "shell", "command": "wget -qO- https://get.docker.com | sudo sh", "expected": "warn", "reason": "wget -O- | sudo sh"}
+{"category": "risky", "ecosystem": "shell", "command": "wget -O- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash", "expected": "warn", "reason": "wget -O- | bash"}
+{"category": "risky", "ecosystem": "shell", "command": "curl https://sh.rustup.rs -sSf | sh -s -- -y", "expected": "warn", "reason": "curl | sh with args"}
+{"category": "risky", "ecosystem": "shell", "command": "bash <(curl -fsSL https://example.com/install.sh)", "expected": "warn", "reason": "process substitution form of curl | bash"}
+{"category": "risky", "ecosystem": "shell", "command": "sh -c \"$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)\"", "expected": "warn", "reason": "command substitution form of curl | sh"}
+{"category": "risky", "ecosystem": "pip", "command": "pip install git+https://github.com/huggingface/transformers.git", "expected": "warn", "reason": "git URL install"}
+{"category": "risky", "ecosystem": "pip", "command": "pip install \"mypkg @ git+https://github.com/example-org/mypkg@v1.2.0\"", "expected": "warn", "reason": "PEP 508 direct reference to git"}
+{"category": "risky", "ecosystem": "pip", "command": "pip install https://files.example.com/pkgs/internal_tool-1.0.tar.gz", "expected": "warn", "reason": "tarball URL install"}
+{"category": "risky", "ecosystem": "npm", "command": "npm install https://registry.example.com/tarballs/pkg-1.0.0.tgz", "expected": "warn", "reason": "tarball URL install"}
+{"category": "risky", "ecosystem": "npm", "command": "npm install github:someuser/left-pad-fork", "expected": "warn", "reason": "npm github: shorthand, unverifiable source"}
+{"category": "risky", "ecosystem": "cargo", "command": "cargo install --git https://github.com/someone/sometool", "expected": "warn", "reason": "cargo git install"}
+{"category": "offline", "ecosystem": "pip", "command": "pip install reqests", "expected": "warn", "reason": "typosquat while registry is unreachable: offline distance check still fires", "registry_offline": true}
+{"category": "offline", "ecosystem": "npm", "command": "npm install lodash@4.17.21", "expected": "allow", "reason": "legit pinned install while registry is unreachable", "registry_offline": true}
+{"category": "offline", "ecosystem": "pip", "command": "pip install fastapi-auth-utils==0.1.0", "expected": "allow", "reason": "hallucinated name while registry is unreachable: fails open by design, not catchable offline", "registry_offline": true}

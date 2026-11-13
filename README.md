@@ -77,9 +77,11 @@ See [Statistics](#statistics).
 
 **5. Flags risky package installs** (`hooks/pkg_install_check.py`, called from `pre_bash_rewrite.py`)
 
-Detects install/run commands across `npm`/`pnpm`/`yarn`, `pip`/`pip3`, `cargo`,
-`gem`, `apt`/`apt-get`, `brew`, `apk`, and `npx`/`pipx run`/`uvx`. Structural
-checks (no network) flag `curl|bash`-style remote-script piping, unpinned
+Detects install/run commands across `npm`/`pnpm`/`yarn`/`bun`, `pip`/`pip3`/
+`python -m pip`/`uv pip`/`uv add`/`poetry add`/`pipx install`, `cargo install`/
+`cargo add`, `gem`, `apt`/`apt-get`, `brew`, `apk`, and `npx`/`bunx`/`pipx run`/
+`uvx`. Structural checks (no network) flag `curl|bash`-style remote-script
+piping (including `| python3 -`, `bash <(curl …)` and `sh -c "$(curl …)"`), unpinned
 versions, confirmation-bypass flags (`--force`, `-y`, `--allow-unauthenticated`),
 and git/URL-based installs. For `npm`, `pip`, `cargo`, and `gem` specifically
 (the ecosystems with an open, anyone-can-publish registry), a registry lookup
@@ -97,6 +99,18 @@ the no-network structural checks apply. Private/internal packages that won't
 resolve against the public registry can be exempted via an allowlist file at
 `~/.ctx-guard/pkg-allowlist` (global) and/or `.ctx-guard/pkg-allowlist`
 (per-repo, glob patterns supported, e.g. `@yourorg/*`).
+
+The agent sees one line naming the decision, the install and the reason, e.g.:
+
+```
+ctx-guard blocked pip install reqeusts: no such package on registry (did you mean requests?). Allowlist: add the name to .ctx-guard/pkg-allowlist (see README#tuning)
+```
+
+Measured catch rate on a 105-command fixture set (stubbed registry, no
+network): 100% of nonexistent names, 92% of typosquats (four-character names
+are not distance-checked), 0 of 47 legitimate installs flagged. See
+[docs/benchmark.md](docs/benchmark.md#package-install-guard) for the method
+and limitations.
 
 Set `CTX_GUARD_PKG_CHECK=0` to disable this feature entirely.
 
@@ -229,6 +243,13 @@ Claude Code runs Bash inside a sandbox that can't write the stats file, so measu
 | `CTX_GUARD_REDACT_LOGS` | 1 | Redact common credential patterns before logs reach the model or remain on disk; set to `0` only for an explicitly trusted local workflow |
 | `CTX_GUARD_BARS` | auto | `ctx-guard-stats` bars: `auto` draws them only when stdout is a TTY, `always`/`never` force them on/off |
 | `CTX_GUARD_AGENT` | `unknown` | Tag written into stats events; set to `claude-code`/`copilot-cli` by the installed hook wiring |
+
+**Package allowlist.** To stop the package guard flagging a name (a private
+package, or a real package it mistakes for a typosquat), add it to
+`.ctx-guard/pkg-allowlist` in the repo or `~/.ctx-guard/pkg-allowlist` for all
+repos. Use one name or glob pattern per line, such as `@yourorg/*`; lines
+starting with `#` are comments. An allowlisted package skips every package
+check, including the registry lookup.
 
 Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; edit `PATTERNS` in `auto_delegate.py` for your routing keywords.
 
