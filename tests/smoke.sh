@@ -167,7 +167,7 @@ decision=$(pkg_hook_field "$PIPE_CMD" permissionDecision)
 reason=$(pkg_hook_field "$PIPE_CMD" permissionDecisionReason)
 [ "$decision" = "ask" ] && ok "pkg-check warning asks (not auto-allow) on curl|bash" || bad "pkg-check curl|bash decision -> $decision"
 case "$reason" in
-  *ctx-guard-pkg*) ok "pkg-check warns on curl|bash" ;;
+  "ctx-guard warned curl|sh: "*) ok "pkg-check warns on curl|bash (single-line message)" ;;
   *) bad "pkg-check warns on curl|bash -> $reason" ;;
 esac
 
@@ -176,15 +176,34 @@ decision=$(pkg_hook_field "$WRAP_CMD" permissionDecision)
 reason=$(pkg_hook_field "$WRAP_CMD" permissionDecisionReason)
 [ "$decision" = "ask" ] && ok "pkg-check warning asks on rewrite+warn (compound wrap)" || bad "pkg-check rewrite+warn decision -> $decision"
 case "$reason" in
-  *ctx-guard-pkg*) ok "pkg-check reason present on rewrite+warn" ;;
+  *"ctx-guard warned apt-get install curl: "*) ok "pkg-check reason present on rewrite+warn" ;;
   *) bad "pkg-check rewrite+warn reason -> $reason" ;;
 esac
 
 reason=$(CTX_GUARD_PKG_CHECK=0 pkg_hook_field "$PIPE_CMD" permissionDecisionReason)
 case "$reason" in
-  *ctx-guard-pkg*) bad "pkg-check disabled via CTX_GUARD_PKG_CHECK=0 -> $reason" ;;
+  *"ctx-guard warned"*) bad "pkg-check disabled via CTX_GUARD_PKG_CHECK=0 -> $reason" ;;
   *) ok "pkg-check disabled via CTX_GUARD_PKG_CHECK=0" ;;
 esac
+
+# Every checked install leaves one pkg_guard stats event (pkg_hook_field runs
+# each command twice, so 2 commands -> 4 events): ecosystem, decision,
+# reason code and package name -- never the command line itself.
+pkg_stats=$(python3 - "$CTX_GUARD_STATS_FILE" <<'PY'
+import json, sys
+raw = open(sys.argv[1]).read()
+evs = [json.loads(l) for l in raw.splitlines() if l.strip()]
+pg = [e for e in evs if e.get("kind") == "pkg_guard"]
+leaked = "get.example.com" in raw or "install.sh" in raw
+print(len(pg), sorted({e.get("reason_code") for e in pg}), "leak" if leaked else "clean")
+PY
+)
+[ "$pkg_stats" = "4 ['bypass_flag', 'pipe_to_shell'] clean" ] \
+  && ok "pkg_guard stats events recorded without the command line" \
+  || bad "pkg_guard stats events -> $pkg_stats"
+pg_json=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$CTX_GUARD_STATS_FILE" --json \
+  | python3 -c 'import json,sys; pg=json.load(sys.stdin)["pkg_guard"]; print(pg["checked"], pg["warned"], pg["blocked"])')
+[ "$pg_json" = "4 4 0" ] && ok "ctx-guard-stats --json reports pkg_guard" || bad "pkg_guard json -> $pg_json"
 
 # Generated wrapper commands must remain safe when the runtime path contains
 # spaces or shell metacharacters.
