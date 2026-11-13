@@ -223,6 +223,21 @@ def wrap_generic(cmd: str) -> str:
     return f"(set -o pipefail; {{ {cmd}\n}} 2>&1 | {run})"
 
 
+def record_pkg_guard_event(result) -> None:
+    """One stats event per checked install. Package names only (URL specs
+    with credentials stripped) -- never the command line, which can carry
+    tokens in env vars, index URLs or headers."""
+    record_stats_event(
+        "pkg_guard",
+        ecosystem=result.ecosystem,
+        decision=result.action,
+        reason_code=result.codes[0] if result.codes else None,
+        reason_codes=result.codes,
+        package=result.package,
+        packages_checked=result.packages_checked,
+    )
+
+
 def transform(cmd: str) -> tuple[str | None, str | None, str | None] | None:
     """Return (rule_name, rewritten command, pkg_warning), or None to leave
     cmd untouched with no pkg_warning either."""
@@ -231,7 +246,11 @@ def transform(cmd: str) -> tuple[str | None, str | None, str | None] | None:
     if SENSITIVE_ENV.match(stripped):
         return "environment-enumeration", None, None
 
-    pkg_result = pkg_install_check.check_command(stripped, cwd=os.getcwd())
+    pkg_result = pkg_install_check.inspect_command(stripped, cwd=os.getcwd())
+    if pkg_result is not None:
+        record_pkg_guard_event(pkg_result)
+        if pkg_result.action == "allow":
+            pkg_result = None
     if pkg_result is not None and pkg_result.action == "block":
         return "pkg-install-blocked", None, pkg_result.reason
     pkg_warning = pkg_result.reason if pkg_result is not None else None
@@ -272,9 +291,8 @@ def main() -> None:
 
         if rule is None and new_cmd is None:
             if pkg_warning:
-                record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
                 decision = build_pretooluse_decision(
-                    reason=f"ctx-guard-pkg: {pkg_warning}",
+                    reason=pkg_warning,
                     decision="ask",
                 )
                 print(json.dumps(decision))
@@ -283,8 +301,7 @@ def main() -> None:
         if new_cmd is None:
             record_stats_event("blocked", rule=rule, tool_name=tool_name)
             if rule == "pkg-install-blocked":
-                record_stats_event("pkg_blocked", tool_name=tool_name, reason=pkg_warning)
-                reason = f"ctx-guard-pkg: {pkg_warning}"
+                reason = pkg_warning
             else:
                 reason = "ctx-guard: environment enumeration is blocked to prevent secret leakage"
             decision = build_pretooluse_decision(reason=reason, decision="deny")
@@ -293,9 +310,8 @@ def main() -> None:
 
         if new_cmd == cmd:
             if pkg_warning:
-                record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
                 decision = build_pretooluse_decision(
-                    reason=f"ctx-guard-pkg: {pkg_warning}",
+                    reason=pkg_warning,
                     decision="ask",
                 )
                 print(json.dumps(decision))
@@ -313,8 +329,7 @@ def main() -> None:
         record_stats_event("rewrite", rule=rule, tool_name=tool_name, **extra)
         reason = f"ctx-guard: rewrote to token-efficient form ({rule})"
         if pkg_warning:
-            record_stats_event("pkg_warned", tool_name=tool_name, reason=pkg_warning)
-            reason += f" | ctx-guard-pkg: {pkg_warning}"
+            reason += f" | {pkg_warning}"
         if pkg_warning:
             # A pkg warning must surface the human permission prompt, not auto-approve.
             decision = build_pretooluse_decision(reason=reason, new_args=new_args, decision="ask")

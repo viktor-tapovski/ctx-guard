@@ -156,6 +156,29 @@ plain ASCII, and `CTX_GUARD_BARS=always|never` overrides the TTY auto-detection
 either way. On a terminal that cannot encode the block glyphs (`LC_ALL=C` and
 similar) the bars fall back to `#`/`-` rather than failing.
 
+Once the package guard has checked an install, the gauge also carries
+`pkg-guard: 8 checked, 2 blocked, 4 warned`, and `--verbose` adds a
+**PACKAGE GUARD** section:
+
+```
+== PACKAGE GUARD (install commands checked before they ran) ==
+  installs checked: 8  (allowed 2, warned 4, blocked 2)
+  top reasons (warned/blocked installs):
+    unpinned             4
+    nonexistent          2
+    typosquat            1
+    pipe_to_shell        1
+```
+
+`--json` carries the same numbers as a `pkg_guard` object (`checked`,
+`allowed`, `warned`, `blocked`, `top_reasons`, `by_ecosystem`) next to the
+existing `pkg_blocked_count` and `pkg_warned_count`. Each check is one
+`pkg_guard` event holding the ecosystem, decision, reason codes
+(`nonexistent`, `typosquat`, `new_package`, `url_install`, `pipe_to_shell`,
+`bypass_flag`, `unpinned`) and the package name, with credentials stripped
+from URL specs. The command line itself is never logged. `pkg_blocked` and
+`pkg_warned` events written by v0.6.0 and earlier still count.
+
 `--verbose` prints the full report, where the compression ratio and the
 per-rule / per-tool breakdowns each get their own bar. It is split into two
 honestly-labeled sections:

@@ -164,6 +164,48 @@ def print_bar(label: str, value: float, total: float, display: str,
     print(f"{desc} {render_bar(value, total)} {display}")
 
 
+def pkg_guard_summary(events: list[dict]) -> dict:
+    """Package-install guard decisions. "pkg_guard" events carry ecosystem,
+    decision and reason codes; "pkg_blocked"/"pkg_warned" events from older
+    versions count toward the totals with an unknown ecosystem and reason."""
+    totals = Counter()
+    reasons = Counter()
+    by_eco = defaultdict(Counter)
+    for e in events:
+        kind = e.get("kind")
+        if kind == "pkg_guard":
+            decision = e.get("decision") or "allow"
+            codes = e.get("reason_codes") or ([e["reason_code"]] if e.get("reason_code") else [])
+        elif kind in ("pkg_blocked", "pkg_warned"):
+            decision = "block" if kind == "pkg_blocked" else "warn"
+            codes = ["unknown"]
+        else:
+            continue
+        eco = e.get("ecosystem") or "unknown"
+        totals["checked"] += 1
+        totals[decision] += 1
+        by_eco[eco]["checked"] += 1
+        by_eco[eco][decision] += 1
+        if decision != "allow":
+            reasons.update(codes)
+    return {
+        "checked": totals["checked"],
+        "allowed": totals["allow"],
+        "warned": totals["warn"],
+        "blocked": totals["block"],
+        "top_reasons": [{"reason": r, "count": c} for r, c in reasons.most_common(5)],
+        "by_ecosystem": {
+            eco: {"checked": c["checked"], "allowed": c["allow"], "warned": c["warn"], "blocked": c["block"]}
+            for eco, c in sorted(by_eco.items())
+        },
+    }
+
+
+def pkg_guard_gauge(summary: dict) -> str:
+    pg = summary["pkg_guard"]
+    return f"pkg-guard: {pg['checked']} checked, {pg['blocked']} blocked, {pg['warned']} warned"
+
+
 def print_gauge(summary: dict) -> None:
     """The default view: one line, the headline savings and nothing else."""
     measured = summary["measured"]
@@ -181,9 +223,8 @@ def print_gauge(summary: dict) -> None:
             parts.append(f"{rewrites} rewrite{'' if rewrites == 1 else 's'}")
         if observed["total_tool_output_bytes"]:
             parts.append(f"{fmt_bytes(observed['total_tool_output_bytes'])} tool output")
-        if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
-            parts.append(f"pkg-guard: {summary['pkg_blocked_count']} blocked, "
-                         f"{summary['pkg_warned_count']} warned")
+        if summary["pkg_guard"]["checked"]:
+            parts.append(pkg_guard_gauge(summary))
         if summary["estimated"]["rewrites"]:
             parts.append(f"est. ~{fmt_tokens(summary['estimated']['saved_tokens_est'])} tokens")
         if not parts:
@@ -203,9 +244,8 @@ def print_gauge(summary: dict) -> None:
     for agent, info in sorted(summary["by_agent"].items()):
         if info["saved_bytes"]:
             tail += f"{sep}{agent} {fmt_bytes(info['saved_bytes'])}"
-    if summary["pkg_blocked_count"] or summary["pkg_warned_count"]:
-        tail += (f"{sep}pkg-guard: {summary['pkg_blocked_count']} blocked, "
-                 f"{summary['pkg_warned_count']} warned")
+    if summary["pkg_guard"]["checked"]:
+        tail += f"{sep}{pkg_guard_gauge(summary)}"
     if summary["estimated"]["rewrites"]:
         tail += f"{sep}+ est. ~{fmt_tokens(summary['estimated']['saved_tokens_est'])} from rewrites"
     print(f"ctx-guard  {bar}{head}"
@@ -582,8 +622,7 @@ def main() -> None:
     total_tool_bytes = sum(tool_bytes_by_tool.values())
 
     # --- OBSERVED: pkg-install security checks ---
-    pkg_blocked = [e for e in events if e.get("kind") == "pkg_blocked"]
-    pkg_warned = [e for e in events if e.get("kind") == "pkg_warned"]
+    pkg_guard = pkg_guard_summary(events)
 
     summary = {
         "events": len(events),
@@ -608,8 +647,9 @@ def main() -> None:
             "total_tool_output_bytes": total_tool_bytes,
         },
         "estimated": estimated_summary(events),
-        "pkg_blocked_count": len(pkg_blocked),
-        "pkg_warned_count": len(pkg_warned),
+        "pkg_blocked_count": pkg_guard["blocked"],
+        "pkg_warned_count": pkg_guard["warned"],
+        "pkg_guard": pkg_guard,
     }
 
     if args.json:
@@ -649,6 +689,16 @@ def main() -> None:
     print(f"  packages blocked (nonexistent/hallucinated): {summary['pkg_blocked_count']}")
     print(f"  packages warned (age/typosquat/unpinned/unverifiable/bypass-flag): "
           f"{summary['pkg_warned_count']}")
+    print()
+    print("== PACKAGE GUARD (install commands checked before they ran) ==")
+    print(f"  installs checked: {pkg_guard['checked']}  (allowed {pkg_guard['allowed']}, "
+          f"warned {pkg_guard['warned']}, blocked {pkg_guard['blocked']})")
+    top = pkg_guard["top_reasons"]
+    max_reason = max((r["count"] for r in top), default=0)
+    if top:
+        print("  top reasons (warned/blocked installs):")
+    for r in top:
+        print_bar(r["reason"], r["count"], max_reason, str(r["count"]))
     est = summary["estimated"]
     print()
     print("== ESTIMATED (rewrites: returned bytes + assumed per-rule ratio -- not measured) ==")
