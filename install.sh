@@ -285,51 +285,21 @@ os.replace(temporary, manifest_path)
 PYEOF
 
 # --- Opt-in status line segment (--statusline) ---
-# Each config's existing statusLine is recorded in the manifest and chained by
+# Each agent's existing statusLine is recorded in the manifest and chained by
 # ctx-guard-statusline, so the user's own status line keeps showing; uninstall
-# puts it back. Re-running the install never records our own command as theirs.
+# puts it back. The agents and their config files are listed in
+# hooks/lib/statusline_config.py (TARGETS).
 if [ "$STATUSLINE" = 1 ]; then
-python3 - "$MANIFEST" "$DEST" "$CLAUDE_SETTINGS" "$HOME/.copilot/settings.json" "$PYTHON_BIN" << 'PYEOF'
-import json, os, shlex, shutil, sys
+python3 - "$MANIFEST" "$DEST" "$HOME" "$PYTHON_BIN" << 'PYEOF'
+import json, os, sys
 
-manifest_path, dest, claude_settings, copilot_settings, python_bin = sys.argv[1:6]
+manifest_path, dest, home, python_bin = sys.argv[1:5]
+sys.path.insert(0, os.path.join(dest, "hooks", "lib"))
+import statusline_config
+
 with open(manifest_path, encoding="utf-8") as f:
     manifest = json.load(f)
-statusline = manifest.setdefault("statusline", {})
-script = os.path.join(dest, "bin", "ctx-guard-statusline")
-
-for agent, path in (("claude-code", claude_settings), ("copilot-cli", copilot_settings)):
-    settings = {}
-    if os.path.isfile(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                settings = json.load(f)
-        except ValueError:
-            print(f"Skipping status line for {agent}: {path} is not plain JSON")
-            continue
-        if agent == "copilot-cli":  # settings.json.bak already holds Claude's original
-            shutil.copy(path, path + ".bak")
-    command = f"{shlex.quote(python_bin)} {shlex.quote(script)} {agent}"
-    current = settings.get("statusLine")
-    entry = statusline.get(agent, {})
-    ours = isinstance(current, dict) and script in str(current.get("command", ""))
-    if not ours:
-        entry["previous"] = current
-    line = {"type": "command", "command": command}
-    previous = entry.get("previous")
-    if isinstance(previous, dict) and "padding" in previous:
-        line["padding"] = previous["padding"]
-    settings["statusLine"] = line
-    entry.update(settings_file=path, command=command)
-    statusline[agent] = entry
-
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    temporary = path + ".ctx-guard.tmp"
-    with open(temporary, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
-    os.replace(temporary, path)
-    print(f"{agent} status line set in {path}")
-
+statusline_config.install(manifest, home, dest, python_bin)
 temporary = manifest_path + ".tmp"
 with open(temporary, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)

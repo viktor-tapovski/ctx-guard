@@ -90,28 +90,13 @@ def remove_copilot_hooks(manifest: dict) -> None:
 
 
 def restore_statuslines(manifest: dict) -> None:
-    for agent, entry in manifest.get("statusline", {}).items():
-        path = Path(entry["settings_file"])
-        if not path.is_file():
-            continue
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError:
-            print(f"Preserving unreadable {agent} settings: {path}")
-            continue
-        current = settings.get("statusLine")
-        if not isinstance(current, dict) or current.get("command") != entry.get("command"):
-            print(f"Preserving changed {agent} status line in {path}")
-            continue
-        if entry.get("previous"):
-            settings["statusLine"] = entry["previous"]
-        else:
-            settings.pop("statusLine")
-        temporary = path.with_suffix(path.suffix + ".ctx-guard.tmp")
-        with temporary.open("w", encoding="utf-8") as stream:
-            json.dump(settings, stream, indent=2)
-        os.replace(temporary, path)
-        print(f"Restored {agent} status line in {path}")
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib"))
+    try:
+        import statusline_config
+    except ImportError:
+        print("statusline_config.py not found; leaving status lines as they are.")
+        return
+    statusline_config.restore(manifest)
 
 
 def restore_agents(manifest: dict) -> None:

@@ -272,6 +272,11 @@ every refresh it keeps an incremental rollup, `stats.rollup.json`, next to
 does not drain sandbox spools, so it can trail `ctx-guard-stats` by one tool
 call. With no stats or no savings yet the segment is empty.
 
+In Copilot CLI the segment shows in the footer's `custom` item; if you don't
+see it, turn that item on in Copilot's footer settings. The agents and their
+config files are listed in one place, `TARGETS` in
+`hooks/lib/statusline_config.py`, which install and uninstall both read.
+
 All stats are per-agent (`claude-code` / `copilot-cli`), recorded to `${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard/stats.jsonl` (persistent across reboots; dir mode `700`), one JSON object per line, mode `600`. If that dir is not writable, writers fall back to `/tmp/ctx-guard-<uid>/state/stats.jsonl`. `ctx-guard-uninstall` leaves this file in place.
 
 ## How cross-tool compatibility works
