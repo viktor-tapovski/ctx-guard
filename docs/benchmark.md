@@ -64,8 +64,8 @@ detected or when the decision is stricter than its label (unpinned legit
 installs are labelled `warn`, because warning on a missing pin is policy).
 `offline` cases run with the registry unreachable and are not scored.
 
-Measured at commit `11d64e1`, which added the fixture set (based on v0.6.0,
-`f2ef879`).
+Measured at commit `f6972f0`, which added the fixture set (based on v0.6.0,
+`d6b148f`).
 
 ```
 By ecosystem
