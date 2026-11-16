@@ -19,6 +19,9 @@ jobs:
         run: bash -n install.sh bin/ctx-guard-run
       - name: Check Python syntax
         run: python3 -m py_compile hooks/*.py hooks/lib/*.py bin/ctx-guard-stats bin/ctx-guard-uninstall
+      - name: Check stdlib-only imports and no binaries
+        if: runner.os == 'Linux'
+        run: python3 tests/check_stdlib_only.py
       - name: Run smoke tests
         run: bash tests/smoke.sh
       - name: Run Python tests (offline; registry lookups are stubbed)

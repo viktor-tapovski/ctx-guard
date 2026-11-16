@@ -24,7 +24,14 @@ Run the focused checks from the repository root:
 bash -n install.sh bin/ctx-guard-run
 python3 -m py_compile hooks/*.py hooks/lib/*.py
 bash tests/smoke.sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 tests/check_stdlib_only.py
 ```
+
+`check_stdlib_only.py` keeps the "nothing to install" promise. It fails when
+code under `hooks/` or `bin/`, or Python embedded in `install.sh`, imports
+anything outside the standard library and ctx-guard's own modules. It also
+fails when a tracked file is binary, or is executable without a shebang.
 
 Keep changes small and add a smoke-test assertion for every new rewrite rule,
 payload shape, permission behavior, or statistics field.
