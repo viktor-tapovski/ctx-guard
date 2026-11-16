@@ -14,5 +14,3 @@ ctx-guard-*/
 
 # Local worktrees
 .worktrees/
-docs/superpowers
-founder/*
