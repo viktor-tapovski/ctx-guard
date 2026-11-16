@@ -177,7 +177,15 @@ config = {
                 "bash": hook_command("pre_bash_rewrite.py"),
                 "env": {"CTX_GUARD_AGENT": "copilot-cli"},
                 "timeoutSec": 15,
-            }
+            },
+            {
+                # Claude names: matches Copilot's view, grep and rg tools.
+                "type": "command",
+                "matcher": "Read|Grep",
+                "bash": hook_command("pre_tool_bound.py"),
+                "env": {"CTX_GUARD_AGENT": "copilot-cli"},
+                "timeoutSec": 15,
+            },
         ],
         "PostToolUse": [
             {

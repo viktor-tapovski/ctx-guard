@@ -629,6 +629,19 @@ else
   bad "install did not register pre_tool_bound.py"
 fi
 
+if python3 - "$FAKE_HOME/.copilot/hooks/ctx-guard.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    entries = json.load(f)["hooks"]["PreToolUse"]
+sys.exit(0 if any(e["matcher"] == "Read|Grep" and "pre_tool_bound.py" in e["bash"]
+                  and e["env"]["CTX_GUARD_AGENT"] == "copilot-cli" for e in entries) else 1)
+PY
+then
+  ok "install registers pre_tool_bound.py for Copilot CLI Read|Grep"
+else
+  bad "install did not register pre_tool_bound.py for Copilot CLI"
+fi
+
 python3 - "$FAKE_HOME/.claude/settings.json" <<'PY'
 import json, sys
 path = sys.argv[1]

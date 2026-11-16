@@ -37,6 +37,7 @@ from ctx_guard_common import (  # noqa: E402
     normalize_tool_call,
     normalize_tool_result_text,
     pending_key,
+    pending_subject,
     prune_old,
     record_stats_event,
     safe_session_id,
@@ -117,8 +118,7 @@ def record_rewrite_estimate(payload: dict) -> None:
     text = normalize_tool_result_text(payload)
     if text is None:
         return
-    subject = tool_args.get("command") or tool_args.get("file_path") or tool_args.get("pattern") or ""
-    pending = os.path.join(PENDING_DIR, pending_key(payload, str(subject)))
+    pending = os.path.join(PENDING_DIR, pending_key(payload, pending_subject(tool_args)))
     claimed = f"{pending}.{os.getpid()}"
     try:
         os.rename(pending, claimed)  # duplicate hook registrations record it once

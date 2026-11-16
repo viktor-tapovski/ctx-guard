@@ -275,6 +275,16 @@ def pending_key(payload: dict, command: str) -> str:
     return f"{safe_session_id(payload)}-{digest}"
 
 
+def pending_subject(tool_args: dict) -> str:
+    """What pending_key hashes when there is no tool_use_id (Copilot CLI):
+    the same field in PreToolUse and PostToolUse for every tool."""
+    for key in ("command", "file_path", "path", "pattern"):
+        value = tool_args.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def prune_old(directory: str, max_age_s: float) -> None:
     try:
         cutoff = time.time() - max_age_s

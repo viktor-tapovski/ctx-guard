@@ -128,7 +128,7 @@ and limitations.
 
 Set `CTX_GUARD_PKG_CHECK=0` to disable this feature entirely.
 
-**6. Bounds large Read and Grep calls** (`hooks/pre_tool_bound.py`, `PreToolUse`) — **Claude Code only**
+**6. Bounds large Read and Grep calls** (`hooks/pre_tool_bound.py`, `PreToolUse`)
 
 Built-in tool output can't be shrunk after the tool runs, so this hook bounds
 the call before it does:
@@ -140,6 +140,12 @@ the call before it does:
 - **Grep** with `output_mode: "content"` and no `head_limit` gets
   `head_limit: CTX_GUARD_GREP_MAX`.
 - **Glob** has no limit field and is not touched.
+
+Under Copilot CLI the same hook bounds the `view` and `grep` tools: a `view`
+with no `view_range` gets `view_range: [1, CTX_GUARD_READ_MAX_LINES]`, and the
+note gives the next `view_range` to read. Copilot doesn't send the hook a
+transcript, so files named in your prompt are bounded too; ask for a specific
+range, or set a higher `CTX_GUARD_READ_MAX_LINES`, when you need more.
 
 The hook only changes the input. It never approves the call, so your normal
 permission rules still apply. Bounded calls are counted under OBSERVED in
@@ -154,7 +160,7 @@ bash install.sh
 
 This installs shared files to `~/.ctx-guard/` (used by both tools) and then:
 - **Claude Code**: merges hooks into `~/.claude/settings.json` (backup saved as `.bak`), installs the three subagents to `~/.claude/agents/`, and appends guard rules to `~/.claude/CLAUDE.md`.
-- **Copilot CLI**: writes `~/.copilot/hooks/ctx-guard.json` wiring the rewrite and stats hooks.
+- **Copilot CLI**: writes `~/.copilot/hooks/ctx-guard.json` wiring the rewrite, Read/Grep bound and stats hooks.
 
 Idempotent — safe to re-run. Restart each tool: verify Claude Code with `/hooks` and `/agents`; verify Copilot CLI with `/env` (look for `ctx-guard.json` under hooks).
 
@@ -286,8 +292,8 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | Env var | Default | Meaning |
 |---|---|---|
 | `CTX_GUARD_MAX_LINES` | 150 | Max lines returned per wrapped command |
-| `CTX_GUARD_READ_MAX_LINES` | 400 | Read calls without a `limit` are capped at this many lines (Claude Code only) |
-| `CTX_GUARD_GREP_MAX` | 100 | `head_limit` added to Grep content searches that set none (Claude Code only) |
+| `CTX_GUARD_READ_MAX_LINES` | 400 | Read calls without a `limit` (Copilot: `view` without a `view_range`) are capped at this many lines |
+| `CTX_GUARD_GREP_MAX` | 100 | `head_limit` added to Grep content searches that set none |
 | `CTX_GUARD_BOUND_TOOLS` | 1 | Set to `0` to stop bounding Read and Grep calls |
 | `CTX_GUARD_WINDOW` | 200000 | Assumed context window for % thresholds (Claude Code only; set 1000000 for 1M-window models) |
 | `CTX_GUARD_LOG_DIR` | /tmp/ctx-guard-\<uid\>/logs | Full-output archive |

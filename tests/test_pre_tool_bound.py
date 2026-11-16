@@ -11,9 +11,8 @@ MONITOR = os.path.join(REPO_ROOT, "hooks", "context_monitor.py")
 STATS_BIN = os.path.join(REPO_ROOT, "bin", "ctx-guard-stats")
 
 
-class TestPreToolBound(unittest.TestCase):
-    """pre_tool_bound.py fed Claude Code PreToolUse payloads, with stats and
-    state under a throwaway dir."""
+class BoundHookCase(unittest.TestCase):
+    """Runs pre_tool_bound.py with stats and state under a throwaway dir."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -44,15 +43,19 @@ class TestPreToolBound(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(proc.stdout) if proc.stdout.strip() else None
 
-    def read_payload(self, path, **args):
-        return {"tool_name": "Read", "tool_use_id": "toolu_read1",
-                "tool_input": {"file_path": path, **args}}
-
     def events(self):
         if not os.path.isfile(self.stats):
             return []
         with open(self.stats) as f:
             return [json.loads(line) for line in f if line.strip()]
+
+
+class TestPreToolBound(BoundHookCase):
+    """pre_tool_bound.py fed Claude Code PreToolUse payloads."""
+
+    def read_payload(self, path, **args):
+        return {"tool_name": "Read", "tool_use_id": "toolu_read1",
+                "tool_input": {"file_path": path, **args}}
 
     def test_large_file_gets_limit(self):
         path = self.make_file("big.py", 5000)
@@ -161,6 +164,57 @@ class TestPreToolBound(unittest.TestCase):
         self.assertEqual(summary["observed"]["bounded_calls_by_tool"], {"Read": 1})
         self.assertIn("read-bound", summary["estimated"]["by_rule"])
         self.assertEqual(summary["measured"]["saved_bytes"], 0)
+
+
+class TestPreToolBoundCopilot(BoundHookCase):
+    """The same hook fed payloads shaped like Copilot CLI 1.0.62 sends them for
+    PascalCase PreToolUse/PostToolUse: Claude tool names, Copilot arguments,
+    no tool_use_id and no transcript_path."""
+
+    def setUp(self):
+        super().setUp()
+        self.env["CTX_GUARD_AGENT"] = "copilot-cli"
+
+    def view_payload(self, path, **args):
+        return {"hook_event_name": "PreToolUse", "session_id": "sess-copilot1",
+                "timestamp": "2026-11-16T12:00:00.000Z", "cwd": self.root,
+                "tool_name": "Read", "tool_input": {"path": path, **args}}
+
+    def test_view_gets_view_range(self):
+        path = self.make_file("big.py", 5000)
+        out = self.run_hook(self.view_payload(path))
+        self.assertEqual(out["hookSpecificOutput"]["updatedInput"],
+                         {"path": path, "view_range": [1, 400]})
+        self.assertEqual(out["modifiedArgs"], {"path": path, "view_range": [1, 400]})
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("view_range=[401, 800]", out["additionalContext"])
+
+    def test_view_untouched(self):
+        path = self.make_file("big.py", 5000)
+        self.assertIsNone(self.run_hook(self.view_payload(path, view_range=[1, -1])))
+        self.assertIsNone(self.run_hook(self.view_payload(self.make_file("small.py", 50))))
+        self.assertIsNone(self.run_hook(self.view_payload(self.root)))  # directory listing
+        self.assertIsNone(self.run_hook(self.view_payload(path), CTX_GUARD_BOUND_TOOLS="0"))
+
+    def test_grep_gets_head_limit(self):
+        args = {"pattern": "TODO", "paths": ["src"], "output_mode": "content"}
+        out = self.run_hook({**self.view_payload(""), "tool_name": "Grep", "tool_input": args})
+        self.assertEqual(out["modifiedArgs"], {**args, "head_limit": 100})
+
+    def test_stats_pair_without_tool_use_id(self):
+        path = self.make_file("big.py", 5000)
+        payload = self.view_payload(path)
+        self.run_hook(payload)
+        # Copilot's view has no default cap: unbounded it returns all 5000 lines.
+        returned = "".join(f"{i}. line {i}\n" for i in range(1, 401))
+        post = {**payload, "hook_event_name": "PostToolUse", "tool_input": {
+                    "path": path, "view_range": [1, 400]},
+                "tool_result": {"result_type": "success", "text_result_for_llm": returned}}
+        self.run_hook(post, script=MONITOR)
+        est = [e for e in self.events() if e["kind"] == "rewrite_estimate"]
+        self.assertEqual(len(est), 1)
+        self.assertEqual(est[0]["agent"], "copilot-cli")
+        self.assertAlmostEqual(est[0]["ratio"], 0.92)
 
 
 if __name__ == "__main__":
