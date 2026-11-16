@@ -9,6 +9,22 @@ support, not theoretical support.
 | GitHub Copilot CLI | `PreToolUse`, `PostToolUse` | Tested |
 | Other terminal agents | Agent-specific hook adapter required | Not supported yet |
 
+## Features by agent
+
+| Feature | Claude Code | GitHub Copilot CLI |
+|---|---|---|
+| Bash rewrite and compression | Yes | Yes |
+| Package-install guard | Yes | Yes |
+| Redacted output archive and `ctx-guard-recall` | Yes | Yes |
+| Stats | Yes | Yes |
+| Read and Grep bounds (`pre_tool_bound.py`) | Yes | No (Copilot's file tools have different names; not registered) |
+| Subagent delegation | Yes | No |
+| Context threshold warnings | Yes | No |
+
+The Read and Grep bounds use PreToolUse `updatedInput`, which replaces the
+whole tool input, and return no permission decision. Checked against
+https://code.claude.com/docs/en/hooks on 2026-11-16.
+
 ## Runtime requirements
 
 - Bash with standard Unix command-line tools.

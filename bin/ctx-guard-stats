@@ -613,6 +613,8 @@ def main() -> None:
     for e in rewrite_events:
         saved_by_agent[e.get("agent", "unknown")] += e.get("saved_bytes", 0)
     rewrite_by_rule = Counter(e.get("rule", "unknown") for e in rewrite_events)
+    bound_by_tool = Counter(e.get("tool_name", "unknown") for e in events
+                            if e.get("kind") == "bound")
 
     # --- OBSERVED: raw tool output volume delivered to the model ---
     tool_events = [e for e in events if e.get("kind") == "tool_output"]
@@ -643,6 +645,7 @@ def main() -> None:
         "observed": {
             "rewrites_by_rule": dict(rewrite_by_rule),
             "total_rewrites": len(rewrite_events),
+            "bounded_calls_by_tool": dict(bound_by_tool),
             "tool_output_bytes_by_tool": dict(tool_bytes_by_tool),
             "total_tool_output_bytes": total_tool_bytes,
         },
@@ -680,6 +683,9 @@ def main() -> None:
     max_rule = max((c for _, c in top_rules), default=0)
     for rule, count in top_rules:
         print_bar(rule, count, max_rule, str(count))
+    if bound_by_tool:
+        print(f"  built-in tool calls bounded: {sum(bound_by_tool.values())}  ("
+              + ", ".join(f"{t} {c}" for t, c in bound_by_tool.most_common()) + ")")
     print(f"  total tool output delivered: {fmt_bytes(total_tool_bytes)} "
           f"(~{fmt_tokens(total_tool_bytes / 4)} tokens)")
     top_tools = sorted(tool_bytes_by_tool.items(), key=lambda kv: -kv[1])[:10]

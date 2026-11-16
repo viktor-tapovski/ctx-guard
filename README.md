@@ -128,6 +128,24 @@ and limitations.
 
 Set `CTX_GUARD_PKG_CHECK=0` to disable this feature entirely.
 
+**6. Bounds large Read and Grep calls** (`hooks/pre_tool_bound.py`, `PreToolUse`) — **Claude Code only**
+
+Built-in tool output can't be shrunk after the tool runs, so this hook bounds
+the call before it does:
+
+- **Read** with no `limit` on a file with more than `CTX_GUARD_READ_MAX_LINES`
+  lines left to read gets `limit` set to that value, plus a note telling the
+  model the file's length and the `offset` to continue from. Files named in
+  your latest prompt, images, PDFs, notebooks and binary files are left alone.
+- **Grep** with `output_mode: "content"` and no `head_limit` gets
+  `head_limit: CTX_GUARD_GREP_MAX`.
+- **Glob** has no limit field and is not touched.
+
+The hook only changes the input. It never approves the call, so your normal
+permission rules still apply. Bounded calls are counted under OBSERVED in
+`ctx-guard-stats`, and their savings are reported under ESTIMATED. Set
+`CTX_GUARD_BOUND_TOOLS=0` to turn it off.
+
 ## Install
 
 ```bash
@@ -198,8 +216,8 @@ per-rule / per-tool breakdowns each get their own bar. It is split into two
 honestly-labeled sections:
 
 - **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
-- **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`) and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof. The exception is read-only git rewrites (`git status`, `git log`, `git diff`, `git show`, `git branch -a`): the hook runs both forms (2s timeout) and records the real before/after bytes as MEASURED. Because the hook runs outside any agent sandbox while `.git/config` is writable from inside it, measurement only happens when every repo-local git config key is on an inert allowlist (no filters, includes, gpg, aliases, ...); otherwise the rewrite falls back to an ESTIMATE.
-- **ESTIMATED** — rewrites that couldn't be measured (`grep`/`find`/`cat`/`docker`/`kubectl`/...). The returned bytes are known; the unbounded size is assumed from a per-rule reduction ratio (`ESTIMATE_RATIOS` in `hooks/lib/ctx_guard_common.py`, overridable with a JSON object in `$CTX_GUARD_ESTIMATE_RATIOS`). Always shown separately and labeled, never added to MEASURED. Claude Code only: the estimate pairs PreToolUse with PostToolUse via `tool_use_id`.
+- **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`), counts of bounded Read/Grep calls, and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof. The exception is read-only git rewrites (`git status`, `git log`, `git diff`, `git show`, `git branch -a`): the hook runs both forms (2s timeout) and records the real before/after bytes as MEASURED. Because the hook runs outside any agent sandbox while `.git/config` is writable from inside it, measurement only happens when every repo-local git config key is on an inert allowlist (no filters, includes, gpg, aliases, ...); otherwise the rewrite falls back to an ESTIMATE.
+- **ESTIMATED** — rewrites that couldn't be measured (`grep`/`find`/`cat`/`docker`/`kubectl`/...), and bounded Read/Grep calls (`read-bound`, `grep-bound`). A bounded Read's ratio comes from the file's line count against the 2,000 lines Read would otherwise return. The returned bytes are known; the unbounded size is assumed from a per-rule reduction ratio (`ESTIMATE_RATIOS` in `hooks/lib/ctx_guard_common.py`, overridable with a JSON object in `$CTX_GUARD_ESTIMATE_RATIOS`). Always shown separately and labeled, never added to MEASURED. Claude Code only: the estimate pairs PreToolUse with PostToolUse via `tool_use_id`.
 
 `--gains` replaces the default report with a measured-only view: a header
 (commands, input/output tokens, tokens saved, exec time, efficiency meter) and a
@@ -268,6 +286,9 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | Env var | Default | Meaning |
 |---|---|---|
 | `CTX_GUARD_MAX_LINES` | 150 | Max lines returned per wrapped command |
+| `CTX_GUARD_READ_MAX_LINES` | 400 | Read calls without a `limit` are capped at this many lines (Claude Code only) |
+| `CTX_GUARD_GREP_MAX` | 100 | `head_limit` added to Grep content searches that set none (Claude Code only) |
+| `CTX_GUARD_BOUND_TOOLS` | 1 | Set to `0` to stop bounding Read and Grep calls |
 | `CTX_GUARD_WINDOW` | 200000 | Assumed context window for % thresholds (Claude Code only; set 1000000 for 1M-window models) |
 | `CTX_GUARD_LOG_DIR` | /tmp/ctx-guard-\<uid\>/logs | Full-output archive |
 | `CTX_GUARD_STATE_DIR` | /tmp/ctx-guard-\<uid\>/state | Per-session "already warned" markers; if set, `stats.jsonl` lives here too |

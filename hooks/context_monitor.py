@@ -117,16 +117,30 @@ def record_rewrite_estimate(payload: dict) -> None:
     text = normalize_tool_result_text(payload)
     if text is None:
         return
-    pending = os.path.join(PENDING_DIR, pending_key(payload, tool_args.get("command", "")))
+    subject = tool_args.get("command") or tool_args.get("file_path") or tool_args.get("pattern") or ""
+    pending = os.path.join(PENDING_DIR, pending_key(payload, str(subject)))
     claimed = f"{pending}.{os.getpid()}"
     try:
         os.rename(pending, claimed)  # duplicate hook registrations record it once
         with open(claimed) as f:
-            rule = f.read().strip()
+            fields = f.read().split()
         os.remove(claimed)
     except OSError:
         return
-    ratio = estimate_ratio(rule)
+    if not fields:
+        return
+    rule = fields[0]
+    # pre_tool_bound.py may append a per-call ratio after the rule name.
+    ratio = None
+    if len(fields) > 1:
+        try:
+            ratio = float(fields[1])
+        except ValueError:
+            pass
+        if ratio is not None and not 0 <= ratio < 1:
+            ratio = None
+    if ratio is None:
+        ratio = estimate_ratio(rule)
     if ratio is None:
         return
     returned = len(text.encode("utf-8", errors="ignore"))

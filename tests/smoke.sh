@@ -616,6 +616,19 @@ mkdir -p "$FAKE_HOME/.claude/agents"
 echo "user-maintained researcher agent" > "$FAKE_HOME/.claude/agents/researcher.md"
 HOME="$FAKE_HOME" bash "$DIR/install.sh" >/dev/null
 
+if python3 - "$FAKE_HOME/.claude/settings.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    entries = json.load(f)["hooks"]["PreToolUse"]
+sys.exit(0 if any(e["matcher"] == "Read|Grep" and "pre_tool_bound.py" in h["command"]
+                  for e in entries for h in e["hooks"]) else 1)
+PY
+then
+  ok "install registers pre_tool_bound.py for Read|Grep"
+else
+  bad "install did not register pre_tool_bound.py"
+fi
+
 python3 - "$FAKE_HOME/.claude/settings.json" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -635,6 +648,12 @@ if grep -q "ctx-guard-policy.py" "$FAKE_HOME/.claude/settings.json"; then
   ok "uninstall preserves unrelated ctx-guard-named hook"
 else
   bad "uninstall removed unrelated ctx-guard-named hook"
+fi
+
+if grep -q "pre_tool_bound.py" "$FAKE_HOME/.claude/settings.json"; then
+  bad "uninstall left pre_tool_bound.py registered"
+else
+  ok "uninstall removes pre_tool_bound.py"
 fi
 
 if [ "$(cat "$FAKE_HOME/.claude/agents/researcher.md")" = "user-maintained researcher agent" ]; then

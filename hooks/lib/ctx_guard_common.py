@@ -139,21 +139,24 @@ def build_pretooluse_decision(
     *,
     reason: str,
     new_args: dict | None = None,
-    decision: str = "allow",
+    decision: str | None = "allow",
+    additional_context: str | None = None,
 ) -> dict:
-    """Build a preToolUse decision object understood by Claude Code and Copilot CLI."""
-    out: dict = {
-        "permissionDecision": decision,
-        "permissionDecisionReason": reason,
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason,
-        },
-    }
+    """Build a preToolUse decision object understood by Claude Code and Copilot CLI.
+    decision=None returns no permission decision, so the runtime's normal
+    permission rules still apply to the (possibly modified) call."""
+    out: dict = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+    if decision is not None:
+        out["permissionDecision"] = decision
+        out["permissionDecisionReason"] = reason
+        out["hookSpecificOutput"]["permissionDecision"] = decision
+        out["hookSpecificOutput"]["permissionDecisionReason"] = reason
     if new_args is not None:
         out["modifiedArgs"] = new_args
         out["hookSpecificOutput"]["updatedInput"] = new_args
+    if additional_context is not None:
+        out["additionalContext"] = additional_context
+        out["hookSpecificOutput"]["additionalContext"] = additional_context
     return out
 
 
@@ -239,6 +242,9 @@ ESTIMATE_RATIOS = {
     "find-unbounded": 0.5, "cat-large": 0.6, "docker-logs": 0.8,
     "kubectl-get": 0.3, "kubectl-describe": 0.5, "terraform-plan": 0.6,
     "pkg-list": 0.6,
+    # Bounded built-in tool calls (pre_tool_bound.py). read-bound is only the
+    # fallback: each bounded Read records its own ratio from the line count.
+    "read-bound": 0.5, "grep-bound": 0.5,
 }
 
 

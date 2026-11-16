@@ -144,6 +144,7 @@ def hook_command(agent, script):
     return f"CTX_GUARD_AGENT={agent} {shlex.quote(python_bin)} {shlex.quote(path)}"
 
 add("PreToolUse",       "Bash", hook_command("claude-code", "pre_bash_rewrite.py"))
+add("PreToolUse",       "Read|Grep", hook_command("claude-code", "pre_tool_bound.py"))
 add("PostToolUse",      "*",    hook_command("claude-code", "context_monitor.py"))
 add("UserPromptSubmit", "",     hook_command("claude-code", "auto_delegate.py"))
 
@@ -249,6 +250,7 @@ manifest.update({
     "claude_settings": claude_settings,
     "claude_hook_commands": [
         hook_command("claude-code", "pre_bash_rewrite.py"),
+        hook_command("claude-code", "pre_tool_bound.py"),
         hook_command("claude-code", "context_monitor.py"),
         hook_command("claude-code", "auto_delegate.py"),
     ],
