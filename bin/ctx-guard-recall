@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""
+ctx-guard-recall: search and retrieve output that ctx-guard-run archived, so
+an agent can pull the exact lines it needs instead of re-running a command.
+
+Reads only the archived `run-*` logs that ctx-guard-run writes, which are
+redacted by default (CTX_GUARD_REDACT_LOGS=1). Never reads raw output and
+refuses any run id that does not name a regular file directly inside the log
+directory. Every subcommand's output is bounded and ends with a notice saying
+what was shown and what was cut.
+
+Usage:
+  ctx-guard-recall list [-n 20]
+  ctx-guard-recall show <run-id|last> [--lines A:B] [--grep PATTERN] [--context N]
+  ctx-guard-recall search PATTERN [--since 1d]
+
+Env: CTX_GUARD_LOG_DIR (default /tmp/ctx-guard-<uid>/logs; ctx-guard-run falls
+     back to $TMPDIR/ctx-guard-<uid>/logs when that is not writable, so both
+     are read).
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import stat
+import sys
+import time
+from datetime import datetime
+
+SHOW_CAP = 200
+SEARCH_CAP = 50
+LIST_CAP = 200
+LINE_CHARS = 500
+RUN_ID = re.compile(r"^run-[A-Za-z0-9._-]{1,64}$")
+SINCE = re.compile(r"^(\d+)([smhdw])$")
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+class RecallError(Exception):
+    pass
+
+
+def log_dirs() -> list[str]:
+    """Same locations ctx-guard-run writes to, primary first."""
+    uid = os.getuid()
+    primary = os.environ.get("CTX_GUARD_LOG_DIR") or f"/tmp/ctx-guard-{uid}/logs"
+    tmp_root = (os.environ.get("TMPDIR") or "/tmp").rstrip("/") or "/"
+    fallback = os.path.join(tmp_root, f"ctx-guard-{uid}", "logs")
+    dirs = []
+    for d in (primary, fallback):
+        real = os.path.realpath(d)
+        if os.path.isdir(real) and real not in dirs:
+            dirs.append(real)
+    return dirs
+
+
+def is_log(path: str) -> bool:
+    """A regular, non-symlink file owned by us; never a raw-*/out-* temp."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+
+
+def all_runs() -> list[tuple[float, str, str]]:
+    """(mtime, run_id, path) for every archived log, newest first."""
+    runs = []
+    for d in log_dirs():
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not RUN_ID.match(name) or name.endswith(".meta"):
+                continue
+            path = os.path.join(d, name)
+            if is_log(path):
+                runs.append((os.lstat(path).st_mtime, name, path))
+    runs.sort(key=lambda r: r[0], reverse=True)
+    return runs
+
+
+def resolve(run_id: str) -> str:
+    """Map a run id (or "last") to a log path inside a log dir, or raise."""
+    if run_id == "last":
+        runs = all_runs()
+        if not runs:
+            raise RecallError("no archived runs found")
+        return runs[0][2]
+    if "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise RecallError(f"refusing path outside the log directory: {run_id!r}")
+    if not run_id.startswith("run-"):
+        run_id = "run-" + run_id
+    if not RUN_ID.match(run_id) or run_id.endswith(".meta"):
+        raise RecallError(f"refusing invalid run id {run_id!r} (expected run-XXXXXXXX or last)")
+    for d in log_dirs():
+        path = os.path.join(d, run_id)
+        if os.path.dirname(os.path.realpath(path)) != d:
+            raise RecallError(f"refusing path outside the log directory: {run_id!r}")
+        if is_log(path):
+            return path
+    raise RecallError(f"no archived run {run_id!r}")
+
+
+def read_meta(path: str) -> dict:
+    meta = {}
+    if not is_log(path + ".meta"):
+        return meta
+    try:
+        with open(path + ".meta", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, sep, value = line.rstrip("\n").partition("=")
+                if sep:
+                    meta[key] = value
+    except OSError:
+        pass
+    return meta
+
+
+def read_lines(path: str) -> list[str]:
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return [line.rstrip("\n") for line in f]
+
+
+def clip(text: str) -> str:
+    if len(text) <= LINE_CHARS:
+        return text
+    return text[:LINE_CHARS] + f" [... {len(text) - LINE_CHARS} chars cut]"
+
+
+def compile_pattern(pattern: str) -> re.Pattern:
+    """Case-insensitive regex; an invalid regex is matched literally."""
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return re.compile(re.escape(pattern), re.IGNORECASE)
+
+
+def parse_range(spec: str, total: int) -> tuple[int, int]:
+    """'A:B' (1-based, inclusive; either side optional) -> (start, end)."""
+    m = re.fullmatch(r"\s*(\d*)\s*:\s*(\d*)\s*", spec or "")
+    if not m:
+        raise RecallError(f"bad --lines {spec!r} (expected A:B, A: or :B)")
+    start = int(m.group(1)) if m.group(1) else 1
+    end = int(m.group(2)) if m.group(2) else total
+    return max(1, start), min(total, end)
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "K", "M"):
+        if n < 1024:
+            return f"{n}{unit}"
+        n //= 1024
+    return f"{n}G"
+
+
+def cmd_list(args) -> int:
+    limit = max(1, min(args.n, LIST_CAP))
+    runs = all_runs()
+    for mtime, run_id, path in runs[:limit]:
+        meta = read_meta(path)
+        try:
+            ts = float(meta.get("ts", mtime))
+        except ValueError:
+            ts = mtime
+        when = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        size = human_size(os.lstat(path).st_size)
+        exit_code = meta.get("exit", "-") or "-"
+        command = clip(meta.get("cmd", "(unknown)") or "(unknown)")
+        print(f"{when}  {run_id}  exit={exit_code:<3} {size:>6}  {command}")
+    shown = min(limit, len(runs))
+    print(f"=== ctx-guard-recall: {shown} of {len(runs)} runs shown"
+          + (" (use -n for more)" if shown < len(runs) else "") + " ===")
+    return 0
+
+
+def cmd_show(args) -> int:
+    path = resolve(args.run_id)
+    run_id = os.path.basename(path)
+    lines = read_lines(path)
+    total = len(lines)
+    start, end = parse_range(args.lines, total) if args.lines else (1, total)
+    cap = max(1, min(args.max_lines, SHOW_CAP))
+    window = range(start, end + 1)
+
+    if args.grep:
+        pattern = compile_pattern(args.grep)
+        context = max(0, args.context)
+        hits = [n for n in window if pattern.search(lines[n - 1])]
+        wanted = set()
+        for n in hits:
+            wanted.update(range(max(start, n - context), min(end, n + context) + 1))
+        selected = sorted(wanted)
+        what = f"{len(hits)} lines matching {args.grep!r}"
+    else:
+        hits = None
+        selected = list(window)
+        what = f"lines {start}-{end}" if total else "no lines"
+
+    printed, prev = 0, None
+    for n in selected:
+        if printed >= cap:
+            break
+        if hits is not None and prev is not None and n != prev + 1:
+            print("--")
+        print(f"{n}: {clip(lines[n - 1])}")
+        printed += 1
+        prev = n
+
+    if printed < len(selected):
+        notice = (f"TRUNCATED at {cap} of {len(selected)} lines; next: --lines {selected[printed]}:"
+                  " or a narrower --grep")
+    else:
+        notice = "not truncated"
+    print(f"=== ctx-guard-recall: {run_id} ({total} lines), {what}; {notice} ===")
+    return 0 if (hits is None or hits) else 1
+
+
+def parse_since(spec: str | None) -> float | None:
+    if not spec:
+        return None
+    m = SINCE.match(spec.strip())
+    if not m:
+        raise RecallError(f"bad --since {spec!r} (expected e.g. 30m, 12h, 1d)")
+    return time.time() - int(m.group(1)) * UNITS[m.group(2)]
+
+
+def cmd_search(args) -> int:
+    pattern = compile_pattern(args.pattern)
+    cutoff = parse_since(args.since)
+    cap = max(1, min(args.max_matches, SEARCH_CAP))
+    matches, more, searched = 0, False, 0
+    for mtime, run_id, path in all_runs():
+        if cutoff is not None and mtime < cutoff:
+            continue
+        searched += 1
+        try:
+            lines = read_lines(path)
+        except OSError:
+            continue
+        for n, line in enumerate(lines, 1):
+            if not pattern.search(line):
+                continue
+            if matches >= cap:
+                more = True
+                break
+            print(f"{run_id}:{n}: {clip(line)}")
+            matches += 1
+        if more:
+            break
+    notice = (f"TRUNCATED at {cap} matches; narrow PATTERN, add --since, or use show <run-id> --grep"
+              if more else "not truncated")
+    print(f"=== ctx-guard-recall: {matches} matches in {searched} runs; {notice} ===")
+    return 0 if matches else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="ctx-guard-recall",
+        description="Search and retrieve redacted output archived by ctx-guard-run.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_list = sub.add_parser("list", help="recent runs: time, id, exit code, size, command")
+    p_list.add_argument("-n", type=int, default=20, metavar="N", help="runs to show (default 20)")
+    p_list.set_defaults(func=cmd_list)
+
+    p_show = sub.add_parser("show", help="print a bounded slice of one run's log")
+    p_show.add_argument("run_id", metavar="RUN_ID", help="run-XXXXXXXX from the hint, or 'last'")
+    p_show.add_argument("--lines", metavar="A:B", help="1-based inclusive line range")
+    p_show.add_argument("--grep", metavar="PATTERN", help="only lines matching this regex (case-insensitive)")
+    p_show.add_argument("--context", type=int, default=0, metavar="N", help="lines of context around --grep hits")
+    p_show.add_argument("--max-lines", type=int, default=SHOW_CAP, metavar="N",
+                        help=f"output cap (default and maximum {SHOW_CAP})")
+    p_show.set_defaults(func=cmd_show)
+
+    p_search = sub.add_parser("search", help="search all retained logs")
+    p_search.add_argument("pattern", metavar="PATTERN")
+    p_search.add_argument("--since", metavar="AGE", help="only runs newer than e.g. 30m, 12h, 1d")
+    p_search.add_argument("--max-matches", type=int, default=SEARCH_CAP, metavar="N",
+                          help=f"match cap (default and maximum {SEARCH_CAP})")
+    p_search.set_defaults(func=cmd_search)
+
+    args = parser.parse_args()
+    try:
+        return args.func(args)
+    except RecallError as e:
+        print(f"ctx-guard-recall: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"ctx-guard-recall: cannot read log: {e.strerror or e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

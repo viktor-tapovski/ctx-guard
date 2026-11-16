@@ -37,11 +37,11 @@ rm -rf /tmp/ctx-guard 2>/dev/null || true
 # versions, now superseded by the shared $DEST above.
 rm -rf "$HOME/.claude/ctx-guard" 2>/dev/null || true
 
-cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
+cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-recall" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
 cp "$SRC"/hooks/*.py                   "$DEST/hooks/"
 cp "$SRC"/hooks/lib/*.py               "$DEST/hooks/lib/"
 cp "$SRC"/hooks/lib/popular_packages/*.txt "$DEST/hooks/lib/popular_packages/"
-chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
+chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-recall" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
 
 python3 - "$SRC" "$DEST" "$HOME/.claude/agents" "$MANIFEST" <<'PYEOF'
 import glob
@@ -96,11 +96,13 @@ with open(manifest_path, "w", encoding="utf-8") as f:
 os.chmod(manifest_path, 0o600)
 PYEOF
 
-# Symlink stats/uninstall into ~/.local/bin so they're callable as plain
-# commands (`ctx-guard-stats`, `ctx-guard-uninstall`) if that dir is on PATH.
+# Symlink recall/stats/uninstall into ~/.local/bin so they're callable as plain
+# commands (`ctx-guard-recall`, `ctx-guard-stats`, `ctx-guard-uninstall`) if
+# that dir is on PATH.
 # ctx-guard-run is intentionally not symlinked -- it's an internal wrapper
 # invoked by the hooks themselves, not something a user runs directly.
 mkdir -p "$LOCAL_BIN"
+ln -sf "$DEST/bin/ctx-guard-recall" "$LOCAL_BIN/ctx-guard-recall"
 ln -sf "$DEST/bin/ctx-guard-stats" "$LOCAL_BIN/ctx-guard-stats"
 ln -sf "$DEST/bin/ctx-guard-uninstall" "$LOCAL_BIN/ctx-guard-uninstall"
 case ":$PATH:" in
@@ -256,6 +258,8 @@ manifest.update({
     "claude_rules_file": rules_file,
     "claude_rules_sha256": sha256(rules_file),
     "local_bin_links": {
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-recall"):
+            os.path.join(dest, "bin", "ctx-guard-recall"),
         os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-stats"):
             os.path.join(dest, "bin", "ctx-guard-stats"),
         os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-uninstall"):

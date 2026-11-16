@@ -58,6 +58,20 @@ older than `CTX_GUARD_LOG_RETENTION_DAYS` are pruned automatically on every
 run. Every invocation also logs a real, measured before/after byte count —
 see [Statistics](#statistics).
 
+Compressed output ends with `Full log: ctx-guard-recall show <run-id> --grep
+<pattern>`. `ctx-guard-recall` (symlinked onto `PATH` by `install.sh`) reads
+only those redacted archives under `CTX_GUARD_LOG_DIR` and refuses run ids
+outside it; every answer is bounded and ends with a truncation notice:
+
+```bash
+ctx-guard-recall list [-n 20]                    # recent runs: time, id, exit code, size, redacted command
+ctx-guard-recall show last --grep FAIL           # matching lines, capped at 200
+ctx-guard-recall show run-Ab3x9QzK --lines 400:460 --grep error --context 2
+ctx-guard-recall search 'ECONNREFUSED' --since 1d # at most 50 matches as run-id:line: text
+```
+
+The three subagents are told to use it instead of re-running a command.
+
 **2. Auto-delegates exploration to subagents** (`hooks/auto_delegate.py`, `UserPromptSubmit` + three agents) — **Claude Code only**, see caveat below
 
 Prompts like "investigate…", "why are tests failing", "where is X defined" get a delegation directive injected, routing to:
@@ -279,7 +293,7 @@ Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; e
 ## Design notes
 
 - **Fails open on Claude Code, fails safe everywhere.** Every hook catches all exceptions and always exits 0 with no output on error, which both Claude Code (fails open) and Copilot CLI (fails closed on crashes) treat as "no action, run normally" — never a silent block.
-- **Nothing lost.** Full output always archived; the model is told the path and instructed to grep it instead of re-running.
+- **Nothing lost.** Full output always archived (redacted); the model is told the run id and instructed to retrieve slices with `ctx-guard-recall` instead of re-running.
 - **Compound commands** (`a && b; c`) are never pattern-rewritten (too risky) — they go through the generic wrapper: `(set -o pipefail; { <cmd>\n} 2>&1 | ctx-guard-run --filter …)`. The original command stays verbatim, so the agent's permission check (Copilot CLI ignores a hook's `allow`) sees and matches the real commands, and `ctx-guard-run` only ever filters output. In Copilot CLI 1.0.105 (`copilot -p`) wrapped commands needed only the allows the original command needs; no extra allow for `ctx-guard-run`. If an interactive session ever prompts for it, allow it once (`--allow-tool 'shell(ctx-guard-run)'`).
 - **Per-user runtime directory.** Logs/scripts/state live under `/tmp/ctx-guard-<uid>/`, created mode `700`, rather than a shared `/tmp/ctx-guard/` — a single predictable, world-readable path would let other local users on a multi-user host read archived command output (potentially including secrets) or race to control the directory before ctx-guard's first run. `install.sh` deletes the old shared path if present.
 - **Credential-aware output handling.** Environment enumeration (`env`, `printenv`, `set`, and `export`) is denied. Common credential patterns are redacted before logs are retained or returned to the model. Pattern-based redaction cannot identify every secret, so do not treat ctx-guard as a guarantee that arbitrary sensitive data is safe to disclose.

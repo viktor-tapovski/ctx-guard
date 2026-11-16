@@ -10,6 +10,7 @@ Rules:
 - Read as much as you need HERE, but return only a compressed report.
 - Always cap command output: pipe through `head`, use `git log --oneline`, `git diff --stat`, `grep ... | head -50`.
 - Never paste whole files into your final answer.
+- For output of a command that already ran, use `ctx-guard-recall show <run-id|last> --grep <pattern>` (run id from the "Full log:" hint) instead of re-running it.
 
 Your final report must contain ONLY:
 1. Direct answer to the question (max 5 sentences)

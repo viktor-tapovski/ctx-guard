@@ -159,6 +159,33 @@ else
 fi
 chmod 600 "$LOG"
 
+# Sidecar metadata for `ctx-guard-recall list`: time, exit code and a redacted,
+# truncated command label. Matches "run-*" so retention prunes it with the log.
+# Best effort: a failure here never affects the command's own exit code.
+write_meta() {
+  local label="" exit_code="-" cmd_file
+  if [ "$FILTER" = 1 ]; then
+    label="${PROGRAM:-(unknown)}"
+  else
+    exit_code="$STATUS"
+    cmd_file="$(mktemp "$LOG_DIR/out-XXXXXXXX")" || return 0
+    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$SCRIPT" 2>/dev/null | head -n 1 > "$cmd_file"
+    if [ "$REDACT_LOGS" = "0" ]; then
+      label="$(cat "$cmd_file")"
+    elif ! label="$(redact_file "$cmd_file")"; then
+      label="(withheld)"
+    fi
+    label="$(printf '%s' "$label" | tr '\n\r\t' '   ' | cut -c 1-200)"
+    rm -f "$cmd_file"
+  fi
+  {
+    printf 'ts=%s\n' "$(date +%s)"
+    printf 'exit=%s\n' "$exit_code"
+    printf 'cmd=%s\n' "$label"
+  } > "$LOG.meta" && chmod 600 "$LOG.meta"
+}
+write_meta 2>/dev/null || true
+
 # log_stats <returned_bytes> <compressed:0|1> -- never lets a stats-logging
 # failure affect ctx-guard-run's own exit code. Logs the program name only,
 # never arguments or paths.
@@ -241,6 +268,15 @@ if [ "$TOTAL" -le "$MAX_LINES" ]; then
 fi
 
 # --- Compressed view: errors first, then head + tail ---
+# Point at ctx-guard-recall by bare name when it is on PATH, else by the copy
+# installed next to this script; fall back to the raw path hint without it.
+if command -v ctx-guard-recall >/dev/null 2>&1; then
+  RECALL="ctx-guard-recall"
+elif [ -x "$(dirname "$0")/ctx-guard-recall" ]; then
+  RECALL="$(cd "$(dirname "$0")" && pwd)/ctx-guard-recall"
+else
+  RECALL=""
+fi
 OUT="$(mktemp "$LOG_DIR/out-XXXXXXXX")"
 {
   if [ "$FILTER" = 1 ]; then
@@ -262,7 +298,11 @@ OUT="$(mktemp "$LOG_DIR/out-XXXXXXXX")"
   echo "--- ... $(( TOTAL - HEAD_N - TAIL_N )) lines omitted ... ---"
   echo "--- last $TAIL_N lines ---"
   tail -n "$TAIL_N" "$LOG"
-  echo "=== full output saved: $LOG (grep/sed it for specifics instead of re-running) ==="
+  if [ -n "$RECALL" ]; then
+    echo "=== Full log: $RECALL show $(basename "$LOG") --grep <pattern> (do not re-run the command) ==="
+  else
+    echo "=== full output saved: $LOG (grep/sed it for specifics instead of re-running) ==="
+  fi
 } > "$OUT"
 
 cat "$OUT"
