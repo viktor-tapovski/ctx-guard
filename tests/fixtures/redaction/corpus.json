@@ -1,0 +1,129 @@
+{
+  "_comment": [
+    "Redaction corpus for tests/test_redaction.py. Every secret is FAKE: obviously",
+    "invalid values with the right shape (AWS's documented EXAMPLE keys, zero and",
+    "EXAMPLE padding). Secrets are stored as parts and joined at runtime, so no",
+    "token-shaped literal is committed and secret scanners / push protection stay",
+    "quiet. In 'lines', {{name}} is replaced with the joined secret of that name.",
+    "'keep' cases are controls: lines that must pass through unchanged."
+  ],
+  "cases": [
+    {
+      "name": "aws_access_key_id",
+      "secrets": {"k": ["AKIA", "IOSFODNN7EXAMPLE"]},
+      "lines": ["botocore.credentials INFO Found credentials in environment variables: {{k}}"]
+    },
+    {
+      "name": "aws_secret_access_key_env",
+      "secrets": {"s": ["wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"]},
+      "lines": ["+ export AWS_SECRET_ACCESS_KEY={{s}}"]
+    },
+    {
+      "name": "aws_credentials_file",
+      "secrets": {"k": ["AKIA", "IOSFODNN7EXAMPLE"], "s": ["wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"]},
+      "lines": ["[default]", "aws_access_key_id = {{k}}", "aws_secret_access_key = {{s}}"]
+    },
+    {
+      "name": "github_classic_token",
+      "secrets": {"t": ["ghp", "_", "EXAMPLEfakeTokenNotReal0000000000000"]},
+      "lines": ["remote: Pushing with {{t}} as x-access-token"]
+    },
+    {
+      "name": "github_fine_grained_token",
+      "secrets": {"t": ["github", "_pat_", "11EXAMPLE0", "_fakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE0000"]},
+      "lines": ["gh: authenticating with {{t}}"]
+    },
+    {
+      "name": "github_token_in_clone_url",
+      "secrets": {"t": ["ghs", "_", "EXAMPLEfakeTokenNotReal0000000000000"]},
+      "lines": ["Cloning into 'repo'... https://x-access-token:{{t}}@github.com/acme/repo.git"]
+    },
+    {
+      "name": "slack_bot_token",
+      "secrets": {"t": ["xox", "b-", "000000000000-000000000000-EXAMPLEfakeEXAMPLEfake00"]},
+      "lines": ["slack-notify: posting to #deploys with token {{t}}"]
+    },
+    {
+      "name": "slack_user_token",
+      "secrets": {"t": ["xox", "p-", "000000000000-000000000000-000000000000-EXAMPLEfake00000000000000"]},
+      "lines": ["DEBUG slack_sdk request headers={'token': '{{t}}'}"]
+    },
+    {
+      "name": "jwt_in_cookie",
+      "secrets": {"j": ["eyJhbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiJleGFtcGxlIn0", ".", "ZmFrZS1zaWduYXR1cmUtZXhhbXBsZQ"]},
+      "lines": ["< set-cookie: session={{j}}; Path=/; HttpOnly"]
+    },
+    {
+      "name": "postgres_url_password",
+      "secrets": {"p": ["fake", "Passw0rd", "EXAMPLE"]},
+      "lines": ["psycopg2.OperationalError: could not connect to postgresql://app_user:{{p}}@db.example.internal:5432/app"]
+    },
+    {
+      "name": "mongo_url_password",
+      "secrets": {"p": ["notA", "RealPass", "123EXAMPLE"]},
+      "lines": ["MongoServerSelectionError: mongodb+srv://admin:{{p}}@cluster0.example.mongodb.net/test?retryWrites=true"]
+    },
+    {
+      "name": "authorization_bearer_header",
+      "secrets": {"t": ["fake", "-bearer-", "EXAMPLE-0000"]},
+      "lines": ["> GET /v1/items HTTP/1.1", "> Authorization: Bearer {{t}}", "> Accept: */*"]
+    },
+    {
+      "name": "authorization_basic_header",
+      "secrets": {"t": ["ZXhhbXBsZTpm", "YWtlLXBhc3N3b3Jk"]},
+      "lines": ["> Authorization: Basic {{t}}"]
+    },
+    {
+      "name": "pem_rsa_private_key",
+      "secrets": {"a": ["MIIEFAKEFAKEFAKE", "EXAMPLEKEYMATERIAL00000000000000"], "b": ["FAKEFAKE", "EXAMPLEKEYMATERIAL11111111111111"]},
+      "lines": ["Loaded deploy key:", "-----BEGIN RSA PRIVATE KEY-----", "{{a}}", "{{b}}", "-----END RSA PRIVATE KEY-----", "ssh: connected"]
+    },
+    {
+      "name": "pem_openssh_private_key",
+      "secrets": {"a": ["b3BlbnNzaC1rZXktdjEAFAKE", "EXAMPLE0000000000000000"]},
+      "lines": ["-----BEGIN OPENSSH PRIVATE KEY-----", "{{a}}", "-----END OPENSSH PRIVATE KEY-----"]
+    },
+    {
+      "name": "dotenv_lines",
+      "secrets": {
+        "a": ["fake", "DbPass", "EXAMPLE"],
+        "b": ["sk_test_", "EXAMPLEfakeEXAMPLEfake0000"],
+        "c": ["fake", "-github-token-", "EXAMPLE"],
+        "d": ["sk-", "EXAMPLEfakeEXAMPLEfake00000"],
+        "e": ["fake", "-client-secret-", "EXAMPLE"]
+      },
+      "lines": [
+        "DATABASE_PASSWORD={{a}}",
+        "STRIPE_SECRET_KEY={{b}}",
+        "GITHUB_TOKEN={{c}}",
+        "export OPENAI_API_KEY=\"{{d}}\"",
+        "OAUTH_CLIENT_SECRET='{{e}}'"
+      ]
+    },
+    {
+      "name": "json_password_field",
+      "secrets": {"p": ["fake", "JsonPass", "EXAMPLE"]},
+      "lines": ["request body: {\"username\": \"ci\", \"password\": \"{{p}}\"}"]
+    },
+    {
+      "name": "npmrc_auth_token",
+      "secrets": {"t": ["npm_", "EXAMPLEfakeEXAMPLEfakeEXAMPLE0000000"]},
+      "lines": ["//registry.npmjs.org/:_authToken={{t}}"]
+    },
+    {
+      "name": "npm_token_bare",
+      "secrets": {"t": ["npm_", "EXAMPLEfakeEXAMPLEfakeEXAMPLE0000000"]},
+      "lines": ["npm notice publishing with automation token {{t}}"]
+    },
+    {
+      "name": "control_lines_kept",
+      "keep": true,
+      "lines": [
+        "collected 120 items / max_tokens=4096 / 3 passwords checked",
+        "PASSED tests/test_auth.py::test_secret_rotation",
+        "GET https://example.com:8443/api/v1/users 200",
+        "Token usage: 1234 input, 567 output"
+      ]
+    }
+  ]
+}

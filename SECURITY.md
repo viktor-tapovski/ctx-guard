@@ -34,6 +34,46 @@ they commonly expose credentials. It also redacts common bearer tokens, API
 keys, passwords, private-key blocks, and known token formats before output is
 returned to the model or retained in the default log.
 
+### What redaction catches
+
+`redact_file` in `bin/ctx-guard-run` applies these patterns line by line before
+anything is archived or returned. `tests/test_redaction.py` runs every pattern
+against a corpus of fake secrets in realistic log lines
+(`tests/fixtures/redaction/corpus.json`).
+
+| Pattern | Example shape (fake) | Replaced with |
+|---|---|---|
+| PEM private-key blocks, including multi-line (`-----BEGIN ... PRIVATE KEY-----` to `END`) | RSA, EC, OpenSSH keys | `[REDACTED PRIVATE KEY]` per line |
+| `Authorization: Bearer`, `Basic` or `token` headers | `Authorization: Bearer abc...` | value -> `[REDACTED]` |
+| Credentials in URLs (`scheme://user:password@host`) | Postgres, MongoDB (`mongodb+srv`), Redis, git clone URLs | password -> `[REDACTED]` |
+| `key=value` / `key: value` / JSON `"key": "value"` where the key contains `password`, `passwd`, `secret`, `token`, `api_key`, `access_key`, `access_token`, `auth_token`, `client_secret`, `private_key` or `credential(s)`, with any prefix or suffix | `.env` lines (`DATABASE_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`), `aws_secret_access_key = ...`, `.npmrc` `_authToken=` | value -> `[REDACTED]` |
+| GitHub tokens: `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_` | anywhere in a line | `[REDACTED TOKEN]` |
+| Slack tokens: `xoxb-`, `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-` | anywhere in a line | `[REDACTED TOKEN]` |
+| AWS access key IDs: `AKIA` + 16 characters | anywhere in a line | `[REDACTED TOKEN]` |
+| `sk-` API keys (OpenAI, Anthropic style), npm `npm_` tokens | anywhere in a line | `[REDACTED TOKEN]` |
+| JWTs (`eyJ...`.`eyJ...`.signature) | cookies, logged headers | `[REDACTED TOKEN]` |
+
+If the sanitizer cannot run or exits with an error, the archive holds only
+`ctx-guard: output withheld because redaction failed` and nothing raw is kept
+or returned (fail closed; covered by `tests/test_redaction.py`). Command labels
+that `ctx-guard-recall list` shows go through the same sanitizer.
+
+Known limitations:
+
+- A bare secret with no recognizable prefix or key name, such as an AWS secret
+  access key printed alone or a random password on its own line, is not caught.
+- Key names must contain one of the keywords above as a separate word part:
+  `DB_PASSWORD=` is caught, camelCase like `githubToken=` and joined words like
+  `mysecret=` are not.
+- Values are cut at whitespace, a comma or a quote, so a quoted secret that
+  contains spaces is only partly redacted.
+- Provider formats not listed (for example Google `AIza` keys, Stripe
+  `sk_live_`/`rk_` keys outside a `secret`- or `token`-named assignment, Azure
+  `AccountKey=` connection strings) are not recognized.
+- Binary output and other encodings are decoded leniently; a secret split
+  across lines (other than a PEM block) is not detected.
+- `CTX_GUARD_REDACT_LOGS=0` disables all of the above.
+
 Redaction is pattern-based and cannot guarantee detection of every possible
 secret. Do not use ctx-guard as a substitute for secret management, agent
 permissions, repository review, or provider-side data controls. Any output

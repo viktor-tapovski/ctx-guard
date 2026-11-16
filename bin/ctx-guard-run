@@ -110,17 +110,25 @@ import re
 import sys
 
 path = sys.argv[1]
+# Key names may carry a prefix/suffix (AWS_SECRET_ACCESS_KEY, DATABASE_PASSWORD,
+# .npmrc's _authToken): the keyword must not follow or precede a letter, so
+# words like "tokens" or "passwords" are left alone. Anchoring on the keyword
+# (not on a scanned prefix) keeps matching linear on long minified lines.
 assignment = re.compile(
     r"""(?ix)
-    (\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|
-    password|passwd|secret|private[_-]?key)\b["']?\s*[:=]\s*["']?)
+    (?<![a-z])
+    ((?:api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|
+    client[_-]?secret|password|passwd|secret|private[_-]?key|token|credentials?)
+    (?![a-z])[\w.-]{0,40}["']?\s*[:=]\s*["']?)
     ([^\s,"']+)
     """
 )
-bearer = re.compile(r"(?i)(\bauthorization\s*:\s*bearer\s+)[^\s]+")
+bearer = re.compile(r"(?i)(\bauthorization\s*:\s*(?:bearer|basic|token)\s+)[^\s]+")
+url_credentials = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]{0,20}://[^\s:/@]+:)[^\s@/]+(@)")
 known_token = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9-]{20,}|"
-    r"xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b"
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|npm_[A-Za-z0-9]{30,}|"
+    r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b"
 )
 private_key = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----")
 private_key_end = re.compile(r"-----END [^-]*PRIVATE KEY-----")
@@ -138,6 +146,7 @@ with open(path, encoding="utf-8", errors="replace") as stream:
             print("[REDACTED PRIVATE KEY]")
             continue
         line = bearer.sub(r"\1[REDACTED]", line)
+        line = url_credentials.sub(r"\1[REDACTED]\2", line)
         line = assignment.sub(r"\1[REDACTED]", line)
         line = known_token.sub("[REDACTED TOKEN]", line)
         sys.stdout.write(line)

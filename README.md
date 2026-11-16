@@ -52,7 +52,7 @@ Known token-burners get rewritten to efficient equivalents:
 log to `/tmp/ctx-guard-<uid>/logs/`, and returns to the model only:
 error/warning lines (numbered) + head + tail + the log path. Common bearer
 tokens, API keys, passwords, private-key blocks, and known token formats are
-redacted before the archive is written. Exit codes are preserved. Commands
+redacted before the archive is written (see [what redaction catches](SECURITY.md#what-redaction-catches)). Exit codes are preserved. Commands
 already piped through `head/tail/grep/wc` are left untouched. Archived logs
 older than `CTX_GUARD_LOG_RETENTION_DAYS` are pruned automatically on every
 run. Every invocation also logs a real, measured before/after byte count —
