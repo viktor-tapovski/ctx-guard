@@ -96,7 +96,7 @@ is pattern-based and is not a guarantee that arbitrary secrets are safe.
 Try it:
 
 ```bash
-git clone https://github.com/viktortapovski/ctx-guard.git
+git clone https://github.com/viktor-tapovski/ctx-guard.git
 cd ctx-guard
 bash install.sh
 ```
@@ -119,7 +119,7 @@ I’m looking for:
 - benchmark fixtures;
 - security and privacy feedback.
 
-GitHub: https://github.com/viktortapovski/ctx-guard
+GitHub: https://github.com/viktor-tapovski/ctx-guard
 
 ## Measurement rule for public posts
 
