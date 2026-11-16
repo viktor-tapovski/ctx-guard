@@ -81,9 +81,11 @@ Prompts like "investigate…", "why are tests failing", "where is X defined" get
 
 All three carry `Use PROACTIVELY` descriptions, so Claude Code also auto-delegates on its own. Cheap models handle the disposable reading; your main-thread model stays clean.
 
-**3. Auto-manages the context window** (`hooks/context_monitor.py`, `PostToolUse`) — **Claude Code only**, see caveat below
+**3. Auto-manages the context window** (`hooks/context_monitor.py`, `PostToolUse`)
 
-Estimates usage from the transcript file (bytes/4) and injects escalating guidance once per session at 50% (prefer subagents), 70% (stop new file reads, suggest focused `/compact`), and 85% (summarize state, compact or restart now). Under Copilot CLI this hook still runs (for stats logging, see below) but skips the window-threshold logic, since Copilot CLI doesn't expose a transcript path to `postToolUse` hooks and already surfaces context usage natively via `/context` and the status line.
+Estimates usage from the transcript file (bytes/4) and injects escalating guidance once per session at 50% (prefer subagents), 70% (stop new file reads, suggest focused `/compact`), and 85% (summarize state, compact or restart now).
+
+Copilot CLI doesn't give hooks a transcript or the context size, so there the estimate is the session's total tool output (bytes/4) against `CTX_GUARD_COPILOT_WINDOW_TOKENS` (default 128000), and each warning is labelled "estimated from tool output". Tool output is only part of the context, so the estimate runs low; the small default window makes up for some of that. The advice names Copilot's built-in `explore` and `task` agents. Copilot's own `/context` and status line show the real figure.
 
 **4. Measures real token savings** (`bin/ctx-guard-stats`)
 
@@ -223,7 +225,7 @@ honestly-labeled sections:
 
 - **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
 - **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`), counts of bounded Read/Grep calls, and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof. The exception is read-only git rewrites (`git status`, `git log`, `git diff`, `git show`, `git branch -a`): the hook runs both forms (2s timeout) and records the real before/after bytes as MEASURED. Because the hook runs outside any agent sandbox while `.git/config` is writable from inside it, measurement only happens when every repo-local git config key is on an inert allowlist (no filters, includes, gpg, aliases, ...); otherwise the rewrite falls back to an ESTIMATE.
-- **ESTIMATED** — rewrites that couldn't be measured (`grep`/`find`/`cat`/`docker`/`kubectl`/...), and bounded Read/Grep calls (`read-bound`, `grep-bound`). A bounded Read's ratio comes from the file's line count against the 2,000 lines Read would otherwise return. The returned bytes are known; the unbounded size is assumed from a per-rule reduction ratio (`ESTIMATE_RATIOS` in `hooks/lib/ctx_guard_common.py`, overridable with a JSON object in `$CTX_GUARD_ESTIMATE_RATIOS`). Always shown separately and labeled, never added to MEASURED. Claude Code only: the estimate pairs PreToolUse with PostToolUse via `tool_use_id`.
+- **ESTIMATED** — rewrites that couldn't be measured (`grep`/`find`/`cat`/`docker`/`kubectl`/...), and bounded Read/Grep calls (`read-bound`, `grep-bound`). A bounded Read's ratio comes from the file's line count against the lines the read would otherwise return (2,000 for Claude Code's Read, the whole file for Copilot's `view`). The returned bytes are known; the unbounded size is assumed from a per-rule reduction ratio (`ESTIMATE_RATIOS` in `hooks/lib/ctx_guard_common.py`, overridable with a JSON object in `$CTX_GUARD_ESTIMATE_RATIOS`). Always shown separately and labeled, never added to MEASURED. The estimate pairs PreToolUse with PostToolUse via `tool_use_id`; Copilot CLI sends none, so there it pairs them by session and the command, file path or pattern.
 
 `--gains` replaces the default report with a measured-only view: a header
 (commands, input/output tokens, tokens saved, exec time, efficiency meter) and a
@@ -285,7 +287,7 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 
 **Important asymmetry:** Copilot CLI's command `preToolUse` hooks are **fail-closed** — a script crash or non-zero exit denies the tool call outright, even if stdout reports `permissionDecision: "allow"` (Claude Code fails open instead). Every hook in this repo therefore wraps its entire body in a top-level `try/except` and always exits `0`, regardless of runtime.
 
-`auto_delegate.py` is intentionally **not** wired into Copilot CLI: Copilot drops all command-hook output (including `additionalContext`) for `userPromptSubmitted`, so the injected delegation directive would never reach the model. Copilot CLI already auto-delegates to its own built-in subagents (`explore`, `task`, `research`, etc.), so this isn't a real capability gap — just a different mechanism.
+`auto_delegate.py` is intentionally **not** wired into Copilot CLI: Copilot reads `additionalContext` from a `userPromptSubmitted` hook but never adds it to the conversation (checked in the Copilot CLI 1.0.62 source), so the injected delegation directive would never reach the model. The hook could rewrite the prompt itself (`modifiedPrompt`), but ctx-guard doesn't change what you typed. Copilot CLI already auto-delegates to its own built-in subagents (`explore`, `task`, `research`, etc.), so this isn't a real capability gap — just a different mechanism.
 
 ## Tuning
 
@@ -296,6 +298,7 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | `CTX_GUARD_GREP_MAX` | 100 | `head_limit` added to Grep content searches that set none |
 | `CTX_GUARD_BOUND_TOOLS` | 1 | Set to `0` to stop bounding Read and Grep calls |
 | `CTX_GUARD_WINDOW` | 200000 | Assumed context window for % thresholds (Claude Code only; set 1000000 for 1M-window models) |
+| `CTX_GUARD_COPILOT_WINDOW_TOKENS` | 128000 | Assumed window for the Copilot CLI thresholds, which count tool output only; lower it to warn earlier |
 | `CTX_GUARD_LOG_DIR` | /tmp/ctx-guard-\<uid\>/logs | Full-output archive |
 | `CTX_GUARD_STATE_DIR` | /tmp/ctx-guard-\<uid\>/state | Per-session "already warned" markers; if set, `stats.jsonl` lives here too |
 | `CTX_GUARD_STATS_FILE` | `${XDG_STATE_HOME:-~/.local/state}/ctx-guard/stats.jsonl` | Override the stats log location (wins over `CTX_GUARD_STATE_DIR`) |

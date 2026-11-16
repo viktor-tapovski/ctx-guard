@@ -3,12 +3,13 @@
 ctx-guard PostToolUse hook. Independent responsibilities, both best-effort
 and non-blocking:
 
-1. Claude Code only: estimates context usage from the session transcript
-   file (bytes/4) and injects escalating guidance once per session at
-   50% / 70% / 85% thresholds. Silently skipped when no transcript_path is
-   present (Copilot CLI's postToolUse payload doesn't include one -- and
-   Copilot CLI already surfaces context-window usage natively via /context
-   and the status line, so this would be redundant there anyway).
+1. Estimates context usage and injects escalating guidance once per
+   session at 50% / 70% / 85% thresholds. Claude Code: from the session
+   transcript file (bytes/4). Copilot CLI sends no transcript_path, so the
+   estimate there is the session's cumulative tool output (bytes/4) against
+   CTX_GUARD_COPILOT_WINDOW_TOKENS, and the warning says it is estimated.
+   Tool output is only part of the context, so this undercounts; the
+   default window is kept small to compensate.
 
 2. Both runtimes: records the size of the tool result actually delivered to
    the model, tagged by tool name and agent (claude-code / copilot-cli), so
@@ -30,6 +31,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
+    AGENT,
     PENDING_DIR,
     build_posttooluse_context,
     drain_spools,
@@ -51,6 +53,7 @@ SCRIPT_DIR = os.environ.get(
 SCRIPT_MAX_AGE_S = 6 * 3600
 
 WINDOW_TOKENS = int(os.environ.get("CTX_GUARD_WINDOW", "200000"))
+COPILOT_WINDOW_TOKENS = int(os.environ.get("CTX_GUARD_COPILOT_WINDOW_TOKENS", "128000"))
 THRESHOLDS = [50, 70, 85]
 STATE_DIR = os.environ.get(
     "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"
@@ -67,18 +70,53 @@ ADVICE = {
          "run /compact or start a fresh session now."),
 }
 
+# Copilot CLI has no researcher / log-triager / code-searcher agents; it
+# delegates to its own built-in ones.
+COPILOT_ADVICE = {
+    50: ("Context is ~50% full. Prefer the built-in explore or task agents for "
+         "any further exploration; view files by exact path and line range only."),
+    70: ("Context is ~70% full. Stop viewing new files directly. Delegate all "
+         "investigation to the explore or task agents and suggest the user run "
+         "/compact at the next natural checkpoint, focused on the current task."),
+    85: ADVICE[85],
+}
+
+
+def session_tool_bytes(session: str, payload: dict) -> int:
+    """Running total of tool output bytes delivered this session (Copilot
+    CLI's stand-in for transcript size). Best-effort read-modify-write."""
+    text = normalize_tool_result_text(payload) or ""
+    path = os.path.join(STATE_DIR, f"{session}.tool-bytes")
+    total = 0
+    try:
+        with open(path) as f:
+            total = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        pass
+    total += len(text.encode("utf-8", errors="ignore"))
+    with open(path, "w") as f:
+        f.write(str(total))
+    return total
+
 
 def check_context_window(payload: dict) -> dict | None:
     transcript = payload.get("transcript_path", "")
-    if not transcript or not os.path.isfile(transcript):
+    copilot = AGENT == "copilot-cli" and not transcript
+    if not copilot and (not transcript or not os.path.isfile(transcript)):
         return None
     session = safe_session_id(payload)
-
-    est_tokens = os.path.getsize(transcript) // 4
-    pct = int(est_tokens * 100 / WINDOW_TOKENS)
+    if copilot and session == "unknown":
+        return None  # a shared counter would mix sessions
 
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     os.chmod(STATE_DIR, 0o700)  # makedirs' mode is masked by umask; enforce explicitly
+    if copilot:
+        pct = int(session_tool_bytes(session, payload) // 4 * 100 / COPILOT_WINDOW_TOKENS)
+        advice, label = COPILOT_ADVICE, "estimated from tool output"
+    else:
+        pct = int(os.path.getsize(transcript) // 4 * 100 / WINDOW_TOKENS)
+        advice, label = ADVICE, "of window"
+
     state_file = os.path.join(STATE_DIR, f"{session}.fired")
     fired = set()
     if os.path.isfile(state_file):
@@ -88,7 +126,7 @@ def check_context_window(payload: dict) -> dict | None:
     msg = None
     for t in THRESHOLDS:
         if pct >= t and str(t) not in fired:
-            msg = f"[ctx-guard ~{pct}% of window] {ADVICE[t]}"
+            msg = f"[ctx-guard ~{pct}% {label}] {advice[t]}"
             fired.add(str(t))
     if not msg:
         return None

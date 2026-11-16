@@ -18,8 +18,8 @@ support, not theoretical support.
 | Redacted output archive and `ctx-guard-recall` | Yes | Yes |
 | Stats | Yes | Yes |
 | Read and Grep bounds (`pre_tool_bound.py`) | Yes | Yes (`view` and `grep`; no prompt-named-file exception) |
-| Subagent delegation | Yes | No |
-| Context threshold warnings | Yes | No |
+| Subagent delegation | Yes | No (prompt-hook context never reaches the model; see below) |
+| Context threshold warnings | Yes | Estimated (from tool output; no transcript or context size in the payload) |
 
 The Read and Grep bounds use PreToolUse `updatedInput`, which replaces the
 whole tool input, and return no permission decision. Checked against
@@ -38,6 +38,17 @@ whenever the decision is not deny or ask, and passes `additionalContext` to
 the model. The payload has no `transcript_path` or `tool_use_id`, so the
 prompt-named-file exception is skipped and stats pair the PreToolUse and
 PostToolUse calls by session and file path.
+
+Delegation and threshold warnings were checked in the Copilot CLI 1.0.62
+source on 2026-11-16. A `userPromptSubmitted` hook's `additionalContext` is
+parsed but never added to the conversation; only `modifiedPrompt` and the
+block or handled fields are acted on. ctx-guard doesn't rewrite your prompt,
+so `auto_delegate.py` stays unregistered for Copilot. A `PostToolUse` hook's
+`additionalContext` is appended to the tool result the model sees, so the
+threshold warnings do reach it. No hook payload carries the context size, so
+`context_monitor.py` estimates it from the session's total tool output
+against `CTX_GUARD_COPILOT_WINDOW_TOKENS` (default 128000) and labels each
+warning as estimated.
 
 ## Runtime requirements
 

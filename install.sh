@@ -157,9 +157,9 @@ PYEOF
 # PascalCase event names (PreToolUse/PostToolUse) get Copilot to deliver
 # Claude-shaped payloads (tool_name/tool_input) and apply Claude's matcher
 # semantics, so the SAME hook scripts run unmodified under both tools.
-# auto_delegate.py is intentionally NOT wired here: Copilot CLI drops
-# command-hook output (including additionalContext) for userPromptSubmitted,
-# and Copilot already auto-delegates to its own built-in subagents.
+# auto_delegate.py is intentionally NOT wired here: Copilot CLI parses but
+# never injects a userPromptSubmitted hook's additionalContext, and Copilot
+# already auto-delegates to its own built-in subagents.
 python3 - "$COPILOT_HOOKS_DIR/ctx-guard.json" "$DEST" "$PYTHON_BIN" << 'PYEOF'
 import json, os, shlex, sys
 
