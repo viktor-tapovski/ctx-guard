@@ -21,6 +21,11 @@
 
 set -uo pipefail
 
+# install.sh replaces "python3" with the interpreter it chose: the agent's
+# PATH may have no python3, or an older one.
+PYTHON_BIN="python3"
+python3() { command "$PYTHON_BIN" "$@"; }
+
 MAX_LINES="${CTX_GUARD_MAX_LINES:-150}"
 DEFAULT_ROOT="/tmp/ctx-guard-$(id -u)"
 LOG_DIR="${CTX_GUARD_LOG_DIR:-$DEFAULT_ROOT/logs}"

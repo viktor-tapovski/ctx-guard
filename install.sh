@@ -146,10 +146,14 @@ fi
 # --- Which agents ------------------------------------------------------------
 # Previously installed agents (from the manifest) are pre-ticked in the
 # checklist along with the detected ones; any of them left out now is removed.
+# Without the checklist they are kept, even when no longer detected: only
+# --agents or the checklist removes an agent.
 PREVIOUS=""
 if [ -f "$MANIFEST" ]; then
-  PREVIOUS="$(python3 - "$MANIFEST" << 'PYEOF'
+  PREVIOUS="$(python3 - "$MANIFEST" "$SRC/hooks/lib" << 'PYEOF'
 import json, sys
+sys.path.insert(0, sys.argv[2])
+import agents
 with open(sys.argv[1], encoding="utf-8") as f:
     m = json.load(f)
 if "installed_agents" in m:
@@ -157,7 +161,7 @@ if "installed_agents" in m:
 else:  # manifests from before agent selection
     found = (["claude-code"] if m.get("claude_settings") else []) + \
             (["copilot-cli"] if m.get("copilot_hooks_file") else []) + list(m.get("hook_files", {}))
-print(",".join(found))
+print(",".join(agent for agent in found if agent in agents.IDS))
 PYEOF
 )"
 fi
@@ -169,6 +173,9 @@ elif [ "$ASSUME_YES" = 0 ] && [ -t 1 ] && { : < /dev/tty; } 2>/dev/null; then
   AGENTS="$(python3 "$SRC/hooks/lib/agent_picker.py" --preselect "$PREVIOUS,$DETECTED")"
 else
   AGENTS="$DETECTED"
+  if [ -n "$PREVIOUS" ]; then
+    AGENTS="$(python3 "$SRC/hooks/lib/agents.py" parse "$PREVIOUS,$DETECTED")"
+  fi
   if [ -z "$AGENTS" ]; then
     echo "No supported agent found on this machine. Choose with --agents, e.g. --agents claude-code" >&2
     exit 1
@@ -205,6 +212,28 @@ cp "$SRC"/hooks/*.py                   "$DEST/hooks/"
 cp "$SRC"/hooks/lib/*.py               "$DEST/hooks/lib/"
 cp "$SRC"/hooks/lib/popular_packages/*.txt "$DEST/hooks/lib/popular_packages/"
 chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-recall" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-try" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
+
+# Point the installed tools at the interpreter chosen above, since the
+# agent's PATH and ~/.local/bin callers may find no python3, or an older one.
+python3 - "$DEST/bin" "$PYTHON_BIN" << 'PYEOF'
+import os, shlex, sys
+bin_dir, python_bin = sys.argv[1], sys.argv[2]
+
+def rewrite(name, old, new):
+    path = os.path.join(bin_dir, name)
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if old in text:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new, 1))
+
+for name in ("ctx-guard-run", "ctx-guard-try"):
+    rewrite(name, '\nPYTHON_BIN="python3"\n', f"\nPYTHON_BIN={shlex.quote(python_bin)}\n")
+# A shebang can't hold spaces, and Linux caps its length.
+if not any(c.isspace() for c in python_bin) and len(python_bin) < 120:
+    for name in ("ctx-guard-recall", "ctx-guard-stats", "ctx-guard-statusline", "ctx-guard-uninstall"):
+        rewrite(name, "#!/usr/bin/env python3\n", f"#!{python_bin}\n")
+PYEOF
 
 python3 - "$MANIFEST" <<'PYEOF'
 import json

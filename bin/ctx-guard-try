@@ -18,7 +18,9 @@ while [ -L "$source_path" ]; do
 done
 BIN="$(cd -P "$(dirname "$source_path")" && pwd)"
 HOOKS="$BIN/../hooks"
-PYTHON="${CTX_GUARD_PYTHON:-python3}"
+# install.sh replaces "python3" with the interpreter it chose.
+PYTHON_BIN="python3"
+PYTHON="${CTX_GUARD_PYTHON:-$PYTHON_BIN}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ctx-guard-try-XXXXXXXX")"
 trap 'rm -rf "$WORK"' EXIT

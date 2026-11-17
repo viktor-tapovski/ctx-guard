@@ -4,7 +4,9 @@ install/uninstall of ctx-guard's entry in $CODEX_HOME/hooks.json.
 
 Every command runs through both the Claude-shaped and the Codex payload.
 Codex takes Claude's hookSpecificOutput but has no "ask", so a package
-warning becomes a systemMessage with no decision and no rewrite.
+warning becomes a systemMessage with no decision and no rewrite. Codex takes
+a rewrite only with "allow", which may skip its approval policy, so commands
+ctx-guard would wrap in ctx-guard-run pass through untouched.
 Payloads follow tests/fixtures/codex/, built from the official field tables
 (no live Codex capture yet). The package registry is stubbed.
 """
@@ -47,10 +49,12 @@ class CodexHookTest(HookTestCase):
             with self.subTest(command=command):
                 claude_text = self.run_hook(self.claude_payload(command), "claude-code")
                 codex_text = self.run_hook(self.codex_payload(command), "codex-cli")
-                if not claude_text.strip():
+                claude = json.loads(claude_text)["hookSpecificOutput"] if claude_text.strip() else {}
+                wrapped = "ctx-guard-run" in claude.get("updatedInput", {}).get("command", "")
+                if not claude or (wrapped and claude.get("permissionDecision") == "allow"):
+                    # Codex may treat "allow" as approval, so wrapped commands pass through.
                     self.assertEqual(codex_text, "")
                     continue
-                claude = json.loads(claude_text)["hookSpecificOutput"]
                 codex = json.loads(codex_text)
                 spec = codex["hookSpecificOutput"]
                 self.assertLessEqual(set(codex), CODEX_OUTPUT)
@@ -59,8 +63,10 @@ class CodexHookTest(HookTestCase):
                 if claude.get("permissionDecision") == "ask":
                     self.assertNotIn("permissionDecision", spec)
                     self.assertNotIn("updatedInput", spec)
-                    self.assertEqual(codex["systemMessage"], claude["permissionDecisionReason"])
-                    self.assertIn(claude["permissionDecisionReason"], spec["additionalContext"])
+                    # The warning alone: Codex runs the command unrewritten.
+                    self.assertTrue(claude["permissionDecisionReason"].endswith(codex["systemMessage"]))
+                    self.assertTrue(codex["systemMessage"].startswith("ctx-guard warned"))
+                    self.assertIn(codex["systemMessage"], spec["additionalContext"])
                     continue
                 self.assertEqual(spec.get("permissionDecision"), claude.get("permissionDecision"))
                 self.assertEqual(spec.get("permissionDecisionReason"), claude.get("permissionDecisionReason"))
@@ -79,6 +85,18 @@ class CodexHookTest(HookTestCase):
     def test_unified_exec_tool_name_is_bash(self):
         out = json.loads(self.run_hook(self.codex_payload("git log", tool_name="exec_command"), "codex-cli"))
         self.assertEqual(out["hookSpecificOutput"]["updatedInput"], {"command": "git log --oneline -n 20"})
+
+    def test_wrapped_commands_are_not_approved(self):
+        for command in ("npm test", "rm -rf build && make", "pip install reqeusts && make"):
+            with self.subTest(command=command):
+                out = self.run_hook(self.codex_payload(command), "codex-cli")
+                spec = json.loads(out)["hookSpecificOutput"] if out else {}
+                self.assertNotIn("permissionDecision", spec)
+                self.assertNotIn("updatedInput", spec)
+        if os.path.exists(self.stats_file):
+            with open(self.stats_file, encoding="utf-8") as f:
+                kinds = [json.loads(line)["kind"] for line in f]
+            self.assertNotIn("rewrite", kinds)
 
     def test_nonexistent_package_is_denied(self):
         out = json.loads(self.run_hook(

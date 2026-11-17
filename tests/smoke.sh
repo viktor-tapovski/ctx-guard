@@ -785,6 +785,27 @@ HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" uninstall >/dev/null
 [ ! -e "$CLI_HOME/.ctx-guard" ] && [ ! -e "$CLI_HOME/.codex/hooks.json" ] && [ ! -L "$CLI_HOME/.local/bin/ctx-guard-try" ] && [ ! -L "$CLI_HOME/.local/bin/ctx-guard-statusline" ] \
   && ok "ctx-guard install then uninstall round-trips" || bad "ctx-guard install/uninstall left files"
 
+# A non-interactive re-run keeps an agent installed earlier but not detected now.
+KEEP_HOME="$SCRATCH/keep-home"
+mkdir -p "$KEEP_HOME/.codex"  # codex-cli is detected, antigravity-cli is not
+HOME="$KEEP_HOME" bash "$DIR/install.sh" --agents antigravity-cli >/dev/null
+HOME="$KEEP_HOME" bash "$DIR/install.sh" --yes >/dev/null 2>&1
+grep -q '"ctx-guard"' "$KEEP_HOME/.gemini/config/hooks.json" 2>/dev/null \
+  && ok "--yes re-run keeps an undetected agent installed earlier" || bad "--yes re-run removed antigravity-cli"
+
+# Installed tools use the Python install chose, not a python3 found on PATH.
+PY_HOME="$SCRATCH/py-home"
+mkdir -p "$PY_HOME/.codex" "$SCRATCH/badpy"
+printf '#!/bin/sh\nexit 1\n' > "$SCRATCH/badpy/python3" && chmod +x "$SCRATCH/badpy/python3"
+HOME="$PY_HOME" CTX_GUARD_PYTHON="$(command -v python3)" bash "$DIR/install.sh" --agents codex-cli >/dev/null
+printf 'for i in $(seq 1 400); do echo "line $i"; done\n' > "$SCRATCH/py-run.sh"
+out=$(HOME="$PY_HOME" PATH="$SCRATCH/badpy:$PATH" CTX_GUARD_STATS_FILE="$SCRATCH/py-stats.jsonl" \
+  "$PY_HOME/.ctx-guard/bin/ctx-guard-run" "$SCRATCH/py-run.sh" codex-cli 2>&1)
+[[ "$out" == *"output compressed"* && "$out" != *"withheld"* ]] && grep -q ctx_guard_run "$SCRATCH/py-stats.jsonl" 2>/dev/null \
+  && ok "ctx-guard-run works when python3 on PATH is broken" || bad "ctx-guard-run with broken python3 -> $out"
+out=$(HOME="$PY_HOME" PATH="$SCRATCH/badpy:$PATH" "$PY_HOME/.local/bin/ctx-guard-stats" --stats-file "$SCRATCH/py-stats.jsonl" 2>&1)
+[[ "$out" == "ctx-guard "* ]] && ok "linked ctx-guard-stats works when python3 on PATH is broken" || bad "linked stats -> $out"
+
 # --- install/uninstall ownership safety -------------------------------------
 
 echo "== install/uninstall ownership safety =="

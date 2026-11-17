@@ -44,8 +44,20 @@ ANTIGRAVITY = "antigravity-cli"
 ANTIGRAVITY_HOOK_NAME = "ctx-guard"
 
 
+# agy blocks the tool call when the hook prints no decision, so the shell
+# prints an allow itself when Python can't run at all: the interpreter is
+# gone (say, after brew autoremove) or an import fails.
+ANTIGRAVITY_ALLOW = """{"decision":"allow"}"""
+
+
+def antigravity_command(dest: str, python_bin: str) -> str:
+    run = hook_command(ANTIGRAVITY, dest, python_bin, "pre_bash_rewrite.py")
+    return (f'out="$({run})"; if [ -n "$out" ]; then printf \'%s\\n\' "$out"; '
+            f"else echo '{ANTIGRAVITY_ALLOW}'; fi")
+
+
 def _antigravity_add(config: dict, dest: str, python_bin: str) -> None:
-    command = hook_command(ANTIGRAVITY, dest, python_bin, "pre_bash_rewrite.py")
+    command = antigravity_command(dest, python_bin)
     config[ANTIGRAVITY_HOOK_NAME] = {
         "PreToolUse": [
             {
