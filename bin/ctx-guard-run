@@ -104,12 +104,16 @@ END_MS="$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null |
 TOTAL=$(wc -l < "$RAW_LOG")
 ORIG_BYTES=$(wc -c < "$RAW_LOG" | tr -d ' ')
 
+# redact_file <path> [--count]: prints the redacted file; with --count, also
+# writes the number of secrets masked to stderr (for the stats event).
 redact_file() {
-  python3 - "$1" <<'PY'
+  python3 - "$@" <<'PY'
 import re
 import sys
 
 path = sys.argv[1]
+count_masks = sys.argv[2:] == ["--count"]
+masked = 0
 # Key names may carry a prefix/suffix (AWS_SECRET_ACCESS_KEY, DATABASE_PASSWORD,
 # .npmrc's _authToken): the keyword must not follow or precede a letter, so
 # words like "tokens" or "passwords" are left alone. Anchoring on the keyword
@@ -144,12 +148,16 @@ with open(path, encoding="utf-8", errors="replace") as stream:
         if private_key.search(line):
             in_private_key = not bool(private_key_end.search(line))
             print("[REDACTED PRIVATE KEY]")
+            masked += 1
             continue
-        line = bearer.sub(r"\1[REDACTED]", line)
-        line = url_credentials.sub(r"\1[REDACTED]\2", line)
-        line = assignment.sub(r"\1[REDACTED]", line)
-        line = known_token.sub("[REDACTED TOKEN]", line)
+        line, n1 = bearer.subn(r"\1[REDACTED]", line)
+        line, n2 = url_credentials.subn(r"\1[REDACTED]\2", line)
+        line, n3 = assignment.subn(r"\1[REDACTED]", line)
+        line, n4 = known_token.subn("[REDACTED TOKEN]", line)
+        masked += n1 + n2 + n3 + n4
         sys.stdout.write(line)
+if count_masks:
+    sys.stderr.write(str(masked))
 PY
 }
 
@@ -160,12 +168,13 @@ PY
 LOG="$(mktemp "$LOG_DIR/run-XXXXXXXX")"
 if [ "$REDACT_LOGS" = "0" ]; then
   mv "$RAW_LOG" "$LOG"
-elif ! redact_file "$RAW_LOG" > "$LOG"; then
+elif ! REDACTED="$(redact_file "$RAW_LOG" --count 2>&1 > "$LOG")"; then
   rm -f "$RAW_LOG"
   printf '%s\n' "ctx-guard: output withheld because redaction failed" > "$LOG"
 else
   rm -f "$RAW_LOG"
 fi
+case "${REDACTED:-}" in ''|*[!0-9]*) REDACTED=0 ;; esac
 chmod 600 "$LOG"
 
 # Sidecar metadata for `ctx-guard-recall list`: time, exit code and a redacted,
@@ -201,10 +210,10 @@ write_meta 2>/dev/null || true
 log_stats() {
   local returned_bytes="$1" compressed="$2"
   python3 - "$STATS_FILE" "$AGENT" "$ORIG_BYTES" "$returned_bytes" "$compressed" "$STATUS" \
-    "$SCRIPT" "$START_MS" "$END_MS" "$FILTER" "$PROGRAM" <<'PY' 2>/dev/null || true
+    "$SCRIPT" "$START_MS" "$END_MS" "$FILTER" "$PROGRAM" "$REDACTED" <<'PY' 2>/dev/null || true
 import json, os, re, shlex, sys, time
 (stats_file, agent, orig, returned, compressed, status, script, start_ms, end_ms,
- filter_mode, program) = sys.argv[1:12]
+ filter_mode, program, redacted) = sys.argv[1:13]
 
 WRAPPERS = {"sudo", "env", "time", "command", "nice"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -263,6 +272,8 @@ event = {
     "returned_bytes": int(returned),
     "compressed": bool(int(compressed)),
     "exit_status": None if filter_mode == "1" else int(status),
+    # Secrets masked in the archived log (a count, never the values).
+    "redacted": int(redacted),
 }
 fd = os.open(stats_file, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
 os.write(fd, (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8"))

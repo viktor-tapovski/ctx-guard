@@ -9,11 +9,20 @@ set -euo pipefail
 usage() {
   cat << 'EOF'
 Usage: install.sh [--agents LIST] [--yes] [--statusline]
+       install.sh --statusline-preset NAME | --statusline-format TEMPLATE
 
   --agents LIST   set up these agents only, comma-separated, or "all":
                   claude-code, copilot-cli, antigravity-cli, codex-cli
   --yes, -y       don't ask; set up the agents detected on this machine
   --statusline    also add ctx-guard's savings to each agent's status line
+  --statusline-preset NAME
+                  shape the status line segment with a bundled preset:
+                  default, minimal, security, full, powerline
+  --statusline-format TEMPLATE
+                  ... or with your own template, e.g. '⬇ {today_all}'
+                  (both write ~/.config/ctx-guard/statusline.json; on their
+                  own they change nothing else and skip the install; preview
+                  the presets with: ctx-guard-statusline --preview)
 
 Without --agents or --yes, a checklist lets you pick agents with the arrow
 keys and space. Re-running with fewer agents removes ctx-guard from the
@@ -24,17 +33,28 @@ EOF
 STATUSLINE=0
 AGENTS_ARG=""
 ASSUME_YES=0
+SL_PRESET=""
+SL_FORMAT=""
+SL_CONFIG=0
+INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --statusline) STATUSLINE=1 ;;
-    --agents) [ $# -ge 2 ] || { echo "--agents needs a value" >&2; exit 2; }; AGENTS_ARG="$2"; shift ;;
-    --agents=*) AGENTS_ARG="${1#--agents=}" ;;
-    --yes|-y) ASSUME_YES=1 ;;
+    --statusline) STATUSLINE=1; INSTALL=1 ;;
+    --statusline-preset) [ $# -ge 2 ] || { echo "--statusline-preset needs a value" >&2; exit 2; }; SL_PRESET="$2"; SL_CONFIG=1; shift ;;
+    --statusline-preset=*) SL_PRESET="${1#--statusline-preset=}"; SL_CONFIG=1 ;;
+    --statusline-format) [ $# -ge 2 ] || { echo "--statusline-format needs a value" >&2; exit 2; }; SL_FORMAT="$2"; SL_CONFIG=1; shift ;;
+    --statusline-format=*) SL_FORMAT="${1#--statusline-format=}"; SL_CONFIG=1 ;;
+    --agents) [ $# -ge 2 ] || { echo "--agents needs a value" >&2; exit 2; }; AGENTS_ARG="$2"; INSTALL=1; shift ;;
+    --agents=*) AGENTS_ARG="${1#--agents=}"; INSTALL=1 ;;
+    --yes|-y) ASSUME_YES=1; INSTALL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+if [ -n "$SL_PRESET" ] && [ -n "$SL_FORMAT" ]; then
+  echo "Use --statusline-preset or --statusline-format, not both" >&2; exit 2
+fi
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/.ctx-guard"
@@ -66,6 +86,62 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 # Every `python3` below runs the interpreter chosen above.
 python3() { "$PYTHON_BIN" "$@"; }
+
+# --- Status line config (--statusline-preset / --statusline-format) ---
+# Writes ~/.config/ctx-guard/statusline.json, read by ctx-guard-statusline on
+# every refresh. The manifest (when ctx-guard is installed) records whether
+# this created the file, so uninstall removes only a file it made. With no
+# other option, that is all this run does.
+write_statusline_config() {
+python3 - "$SRC" "$MANIFEST" "$SL_PRESET" "$SL_FORMAT" << 'PYEOF'
+import json, os, sys
+
+src, manifest_path, preset, template = sys.argv[1:5]
+sys.path.insert(0, os.path.join(src, "hooks", "lib"))
+import statusline_format
+
+manifest = None
+if os.path.isfile(manifest_path):
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+try:
+    path = statusline_format.write_config(manifest, preset=preset or None,
+                                          template=template or None)
+except (OSError, ValueError) as e:
+    raise SystemExit(f"Status line config not written: {e}")
+if manifest is not None:
+    temporary = manifest_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, manifest_path)
+what = f"preset {preset}" if preset else "your template"
+print(f"Status line config written to {path} ({what})")
+PYEOF
+}
+if [ "$SL_CONFIG" = 1 ]; then
+  # Check the preset or template before installing anything.
+  python3 - "$SRC" "$SL_PRESET" "$SL_FORMAT" << 'PYEOF' || exit 2
+import os, sys
+
+src, preset, template = sys.argv[1:4]
+sys.path.insert(0, os.path.join(src, "hooks", "lib"))
+import statusline_format
+
+if preset and preset not in statusline_format.PRESETS:
+    raise SystemExit(f"Unknown status line preset {preset!r}; "
+                     f"choose from {', '.join(statusline_format.PRESETS)}")
+try:
+    statusline_format.parse(template)
+except ValueError as e:
+    raise SystemExit(f"Invalid status line template: {e}")
+PYEOF
+  if [ "$INSTALL" = 0 ]; then
+    write_statusline_config
+    echo "Preview the presets with: ctx-guard-statusline --preview"
+    exit 0
+  fi
+fi
 
 # --- Which agents ------------------------------------------------------------
 # Previously installed agents (from the manifest) are pre-ticked in the
@@ -445,6 +521,7 @@ os.chmod(temporary, 0o600)
 os.replace(temporary, manifest_path)
 PYEOF
 fi
+if [ "$SL_CONFIG" = 1 ]; then write_statusline_config; fi
 
 echo ""
 echo "Done."

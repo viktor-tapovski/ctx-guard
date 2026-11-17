@@ -212,8 +212,18 @@ def save_manifest(manifest: dict) -> None:
     os.replace(temporary, MANIFEST_PATH)
 
 
+def remove_statusline_config(manifest: dict) -> None:
+    """The status line config file, only if install.sh created it."""
+    try:
+        import statusline_format
+    except ImportError:
+        return
+    statusline_format.remove_config(manifest)
+
+
 def remove_shared(manifest: dict) -> None:
     remove_links(manifest)
+    remove_statusline_config(manifest)
     if DEST.is_dir():
         shutil.rmtree(DEST)
         print(f"Removed {DEST}")

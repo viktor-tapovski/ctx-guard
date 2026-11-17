@@ -16,17 +16,35 @@ so it can lag one tool call behind ctx-guard-stats.
 A status line the user had before install is recorded in the install manifest
 and run first (same stdin); this segment is appended after ` │ `. Any failure
 here prints nothing of ours, so the user's own status line still shows.
+
+The segment's shape comes from ~/.config/ctx-guard/statusline.json (a preset or
+a template; see hooks/lib/statusline_format.py). Without one, or when it can't
+be used, the output is the default segment above.
+
+  ctx-guard-statusline <agent> --segment   only our segment, never chains: for
+                                           a status line script to embed
+  ctx-guard-statusline [<agent>] --preview every preset with your stats
+
+While chaining, the previous command runs with CTX_GUARD_STATUSLINE_CHAINING=1.
+Any ctx-guard-statusline started under that marker prints nothing and chains
+nothing, so a chained script that embeds --segment shows it once (the outer
+run adds it) and can never loop.
 """
 from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
 import time
 
-ROLLUP_VERSION = 1
+ROLLUP_VERSION = 2
 CHAIN_TIMEOUT_S = 5
+STDIN_TIMEOUT_S = 1
+CHAINING_MARKER = "CTX_GUARD_STATUSLINE_CHAINING"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..",
+                                "hooks", "lib"))
 
 
 def stats_file() -> str:
@@ -56,6 +74,19 @@ def event_savings(ev: dict) -> tuple[int, int]:
         return ev.get("saved_bytes", 0), 0
     if kind == "rewrite_estimate":
         return 0, ev.get("est_saved_bytes", 0)
+    return 0, 0
+
+
+def event_security(ev: dict) -> tuple[int, int]:
+    """(package installs warned or blocked, archives written with secrets
+    masked), counted like ctx-guard-stats' package guard summary."""
+    kind = ev.get("kind")
+    if kind == "pkg_guard":
+        return int((ev.get("decision") or "allow") != "allow"), 0
+    if kind in ("pkg_blocked", "pkg_warned"):
+        return 1, 0
+    if kind == "ctx_guard_run":
+        return 0, int(bool(ev.get("redacted")))
     return 0, 0
 
 
@@ -97,13 +128,17 @@ def update_rollup(path: str, rollup_path: str) -> dict:
         # A malformed event must not raise: the offset would never advance past it.
         try:
             measured, estimated = (int(n) for n in event_savings(ev))
-            if not measured and not estimated:
+            flagged, redacted = event_security(ev)
+            if not measured and not estimated and not flagged and not redacted:
                 continue
             today = time.strftime("%Y-%m-%d", time.localtime(float(ev.get("ts", 0)))) == day
             agent = str(ev.get("agent", "unknown"))
         except (AttributeError, TypeError, ValueError, OverflowError, OSError):
             continue
-        totals = rollup["agents"].setdefault(agent, {"today": [0, 0], "total": [0, 0]})
+        totals = rollup["agents"].setdefault(
+            agent, {"today": [0, 0], "total": [0, 0], "pkg_flagged": 0, "redacted": 0})
+        totals["pkg_flagged"] += flagged
+        totals["redacted"] += redacted
         totals["total"][0] += measured
         totals["total"][1] += estimated
         if today:
@@ -133,16 +168,64 @@ def pair(measured: int, estimated: int) -> str:
     return f"{text} (~{fmt_tokens(estimated)})" if estimated else text
 
 
-def segment(agent: str) -> str:
+def agent_totals(agent: str) -> dict | None:
     path = stats_file()
     if not os.path.isfile(path):
-        return ""
+        return None
     rollup = update_rollup(path, os.path.splitext(path)[0] + ".rollup.json")
-    totals = rollup["agents"].get(agent)
+    return rollup["agents"].get(agent)
+
+
+def segment(agent: str) -> str:
+    """The default segment, with no config: the fallback for any config error."""
+    totals = agent_totals(agent)
     if not totals or not any(totals["total"]):
         return ""
     return (f"ctx-guard ⬇ today {pair(*totals['today'])}"
             f" · total {pair(*totals['total'])}")
+
+
+def read_stdin() -> bytes:
+    """The status line payload. Stops after STDIN_TIMEOUT_S without data, so a
+    host that leaves stdin open never blocks us."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return b""
+        fd = sys.stdin.fileno()
+        chunks = []
+        while select.select([fd], [], [], STDIN_TIMEOUT_S)[0]:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except (OSError, ValueError):
+        return b""
+
+
+def load_options(agent: str):
+    """(statusline_format module, options), or (None, None) when the config or
+    the module can't be used."""
+    try:
+        import statusline_format
+        return statusline_format, statusline_format.load_options(agent)
+    except Exception:
+        return None, None
+
+
+def configured_segment(agent: str, fmt, options: dict | None, payload) -> str:
+    if fmt is None:
+        return segment(agent)
+    try:
+        session = {}
+        if fmt.needs_session(options):
+            try:
+                session = fmt.session_info(json.loads(payload() or b"null"))
+            except ValueError:
+                session = {}
+        return fmt.format_segment(agent_totals(agent), session, agent, options)
+    except Exception:
+        return segment(agent)
 
 
 def chained_command(agent: str) -> str | None:
@@ -156,28 +239,81 @@ def chained_command(agent: str) -> str | None:
         return None
 
 
+def preview(agent: str | None) -> None:
+    """Every preset rendered with this agent's real stats. model and context
+    come from stdin when piped one, else from sample values."""
+    import statusline_format as fmt
+    path = stats_file()
+    agents = {}
+    if os.path.isfile(path):
+        agents = update_rollup(path, os.path.splitext(path)[0] + ".rollup.json")["agents"]
+    if agent is None:
+        agent = max(agents, key=lambda a: sum(agents[a]["total"]), default="claude-code")
+    payload = read_stdin()
+    try:
+        session = fmt.session_info(json.loads(payload)) if payload else {}
+    except ValueError:
+        session = {}
+    sample = not session
+    if sample:
+        session = fmt.session_info({"model": {"display_name": "Model"}, "cwd": os.getcwd(),
+                                    "context_window": {"used_percentage": 42}})
+    note = "; model and context are sample values" if sample else ""
+    lines = [f"ctx-guard status line presets for {agent} (your stats{note}):"]
+    for name, preset in fmt.PRESETS.items():
+        options = fmt.resolve({"preset": name, "hide_when_zero": False}, agent)
+        lines.append(f"  {name:10s} {fmt.format_segment(agents.get(agent), session, agent, options)}")
+    config = fmt.config_path()
+    try:
+        options = fmt.load_options(agent, config)
+        options["hide_when_zero"] = False
+        state = "yours" if os.path.exists(config) else "no config, default"
+        lines.append(f"  {state}: {fmt.format_segment(agents.get(agent), session, agent, options)}")
+    except Exception as e:
+        lines.append(f"  {config} can't be used ({e}); the default segment shows instead")
+    lines.append(f"Pick one: install.sh --statusline-preset <name>, or edit {config}")
+    sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
+
+
 def main() -> None:
-    agent = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CTX_GUARD_AGENT", "unknown")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    if "--preview" in flags:
+        preview(args[0] if args else None)
+        return
+    # Started by a ctx-guard-statusline that is chaining: it adds our segment.
+    if os.environ.get(CHAINING_MARKER):
+        return
+    agent = args[0] if args else os.environ.get("CTX_GUARD_AGENT", "unknown")
+    fmt, options = load_options(agent)
+    stdin = []
+
+    def payload() -> bytes:
+        # stdin is only read when a chained command or a session field needs
+        # it: an unchained default run never waits on it.
+        if not stdin:
+            stdin.append(read_stdin())
+        return stdin[0]
+
     chained = ""
-    command = chained_command(agent)
+    command = None if "--segment" in flags else chained_command(agent)
     if command:
-        # stdin is only read for the chained command: an unchained run never
-        # blocks on a host that leaves it open.
         try:
-            payload = b"" if sys.stdin.isatty() else sys.stdin.buffer.read()
-            result = subprocess.run(["/bin/sh", "-c", command], input=payload,
+            result = subprocess.run(["/bin/sh", "-c", command], input=payload(),
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    env={**os.environ, CHAINING_MARKER: "1"},
                                     timeout=CHAIN_TIMEOUT_S)
             chained = result.stdout.decode("utf-8", "replace").rstrip("\n")
         except (OSError, subprocess.SubprocessError):
             pass
 
     try:
-        ours = segment(agent)
+        ours = configured_segment(agent, fmt, options, payload)
     except Exception:
         ours = ""
 
-    out = " │ ".join(part for part in (chained, ours) if part)
+    separator = options["separator"] if options else " │ "
+    out = separator.join(part for part in (chained, ours) if part)
     if out:
         sys.stdout.buffer.write((out + "\n").encode("utf-8"))
 

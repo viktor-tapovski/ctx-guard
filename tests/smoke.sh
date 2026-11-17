@@ -1070,6 +1070,9 @@ echo '{"ts": null, "kind": "ctx_guard_run", "agent": "claude-code", "original_by
 sl_event claude-code ctx_guard_run 0 4000
 out=$(sl claude-code)
 [ "$out" = "ctx-guard ⬇ today 3.0k · total 3.0k" ] && ok "malformed event skipped, later ones counted" || bad "malformed -> $out"
+saved=$(python3 "$DIR/bin/ctx-guard-stats" --stats-file "$sl_file" --json 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["measured"]["saved_bytes"])' 2>/dev/null)
+[ "$saved" = "12000" ] && ok "ctx-guard-stats skips a malformed event" || bad "stats on malformed log -> $saved"
 [ -z "$(sl unknown-agent)" ] && ok "agent without savings prints nothing" || bad "other agent -> $(sl unknown-agent)"
 
 SL_HOME="$SCRATCH/sl-home"
@@ -1086,13 +1089,51 @@ grep -q '"command": ".*ctx-guard-statusline'"'"'\{0,1\} copilot-cli"' "$SL_HOME/
   && ok "Copilot status line set" || bad "Copilot settings -> $(cat "$SL_HOME/.copilot/settings.json")"
 out=$(PYTHONIOENCODING=ascii CTX_GUARD_STATS_FILE="$sl_file" "$SL_HOME/.ctx-guard/bin/ctx-guard-statusline" claude-code </dev/null)
 [ "$out" = "base │ ctx-guard ⬇ today 3.0k · total 3.0k" ] && ok "non-UTF-8 stdout still prints both parts" || bad "ascii stdout -> $out"
-HOME="$SL_HOME" "$DIR/bin/ctx-guard-uninstall" >/dev/null
+sl_cfg="$SL_HOME/.config/ctx-guard/statusline.json"
+sl_inst() { HOME="$SL_HOME" XDG_CONFIG_HOME="$SL_HOME/.config" CTX_GUARD_STATS_FILE="$sl_file" "$@"; }
+sl_inst bash "$DIR/install.sh" --statusline-preset minimal >/dev/null \
+  && grep -q '"preset": "minimal"' "$sl_cfg" && ok "--statusline-preset writes the config" \
+  || bad "--statusline-preset -> $(cat "$sl_cfg" 2>&1)"
+grep -q '"created": true' "$SL_HOME/.ctx-guard/install-manifest.json" \
+  && ok "manifest records that install created the config" || bad "config not in manifest"
+out=$(sl_inst "$SL_HOME/.ctx-guard/bin/ctx-guard-statusline" claude-code </dev/null)
+[ "$out" = "base │ ⬇ 3.0k" ] && ok "preset shapes the chained status line" || bad "preset line -> $out"
+sl_inst bash "$DIR/install.sh" --statusline-preset nope >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && grep -q minimal "$sl_cfg" && ok "unknown preset rejected, config kept" || bad "unknown preset rc=$rc"
+sl_inst bash "$DIR/install.sh" --statusline-format '{nope}' >/dev/null 2>&1 \
+  && bad "unknown template field accepted" || ok "unknown template field rejected"
+out=$(sl_inst "$SL_HOME/.ctx-guard/bin/ctx-guard-statusline" claude-code --segment </dev/null)
+[ "$out" = "⬇ 3.0k" ] && ok "--segment prints only our segment" || bad "--segment -> $out"
+out=$(CTX_GUARD_STATUSLINE_CHAINING=1 sl_inst "$SL_HOME/.ctx-guard/bin/ctx-guard-statusline" claude-code --segment </dev/null)
+[ -z "$out" ] && ok "--segment under the chaining marker prints nothing" || bad "marker -> $out"
+out=$(sl_inst "$SL_HOME/.ctx-guard/bin/ctx-guard-statusline" --preview claude-code </dev/null)
+case "$out" in *"  security   ⬇ 3.0k · 🛡 0"*"yours: ⬇ 3.0k"*) ok "--preview renders every preset" ;;
+  *) bad "--preview -> $out" ;; esac
+# A clean log: $sl_file holds a deliberately malformed event.
+sl_hint_file="$SCRATCH/sl/hint.jsonl"
+echo '{"ts": 1, "kind": "rewrite", "agent": "claude-code", "saved_bytes": 40}' > "$sl_hint_file"
+out=$(sl_inst "$SL_HOME/.ctx-guard/bin/ctx-guard-stats" --stats-file "$sl_hint_file" 2>&1)
+case "$out" in *"Status line:"*) bad "hint with ctx-guard's status line in place" ;;
+  *) ok "no status line hint while ctx-guard's line is set" ;; esac
+python3 - "$SL_HOME/.claude/settings.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1])); doc["statusLine"]["command"] = "echo other-tool"
+json.dump(doc, open(sys.argv[1], "w"))
+PY
+out=$(sl_inst "$SL_HOME/.ctx-guard/bin/ctx-guard-stats" --stats-file "$sl_hint_file" 2>&1)
+case "$out" in *"Status line: ctx-guard no longer shows in the claude-code status line"*)
+  ok "ctx-guard-stats hints when another tool replaced the status line" ;;
+  *) bad "no replaced-status-line hint -> $out" ;; esac
+sl_inst bash "$DIR/install.sh" --agents claude-code,copilot-cli --statusline >/dev/null
+HOME="$SL_HOME" XDG_CONFIG_HOME="$SL_HOME/.config" "$DIR/bin/ctx-guard-uninstall" >/dev/null
+[ ! -e "$sl_cfg" ] && ok "uninstall removes the config install created" || bad "config left after uninstall"
 python3 - "$SL_HOME" <<'PY' && ok "uninstall restores both status lines" || bad "status lines not restored"
 import json, sys
 home = sys.argv[1]
 claude = json.load(open(f"{home}/.claude/settings.json"))
 copilot = json.load(open(f"{home}/.copilot/settings.json"))
-assert claude["statusLine"] == {"type": "command", "command": "echo base", "padding": 1}, claude
+# The other tool's line, re-chained by the last --statusline, is put back.
+assert claude["statusLine"] == {"type": "command", "command": "echo other-tool", "padding": 1}, claude
 assert "statusLine" not in copilot, copilot
 PY
 
