@@ -21,12 +21,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "hooks"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "hooks", "lib"))
 
-import antigravity_config  # noqa: E402
+import agent_hooks  # noqa: E402
 import ctx_guard_common  # noqa: E402
 import pkg_install_check  # noqa: E402
 import pre_bash_rewrite  # noqa: E402
 
 FIXTURES = os.path.join(REPO_ROOT, "tests", "fixtures", "antigravity")
+AGY = next(t for t in agent_hooks.TARGETS if t.agent == "antigravity-cli")
 REGISTRY = {"npm": {"react": 4000, "lodash": 4000}, "pip": {"requests": 4000, "reqeusts": 400}}
 
 # Rewrites, wraps, a block, package-guard outcomes, and pass-throughs.
@@ -196,11 +197,11 @@ class InstallTest(unittest.TestCase):
 
     def install(self):
         with redirect_stdout(io.StringIO()):
-            antigravity_config.install(self.manifest, self.home, "/opt/ctx guard", "/usr/bin/python3")
+            agent_hooks.install_target(AGY, self.manifest, self.home, "/opt/ctx guard", "/usr/bin/python3")
 
     def restore(self):
         with redirect_stdout(io.StringIO()):
-            antigravity_config.restore(self.manifest)
+            agent_hooks.restore_target(AGY, self.manifest)
 
     def read(self):
         with open(self.path, "rb") as f:
@@ -249,13 +250,13 @@ class InstallTest(unittest.TestCase):
         self.write_existing(b"{not json")
         self.install()
         self.assertEqual(self.read(), b"{not json")
-        self.assertNotIn("antigravity", self.manifest)
+        self.assertNotIn("antigravity-cli", self.manifest.get("hook_files", {}))
 
     def test_skipped_when_agy_not_installed(self):
         os.rmdir(os.path.join(self.home, ".gemini", "antigravity-cli"))
         self.install()
         self.assertFalse(os.path.exists(self.path))
-        self.assertNotIn("antigravity", self.manifest)
+        self.assertNotIn("antigravity-cli", self.manifest.get("hook_files", {}))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # sandboxed runs where only $TMPDIR is writable.
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ctx-guard-smoke-XXXXXXXX")" || exit 1
 trap 'rm -rf "$SCRATCH"' EXIT
+# Installs below use fake HOMEs; never let them reach the real Codex config.
+unset CODEX_HOME
 
 export CTX_GUARD_RUN="$DIR/bin/ctx-guard-run"
 export CTX_GUARD_SCRIPT_DIR="$SCRATCH/scripts"
@@ -631,6 +633,30 @@ out=$(echo '{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo h
 HOME="$AGY_HOME" python3 "$AGY_HOME/.ctx-guard/bin/ctx-guard-uninstall" >/dev/null
 cmp -s "$SCRATCH/agy-hooks.orig" "$AGY_HOME/.gemini/config/hooks.json" \
   && ok "uninstall restores Antigravity hooks.json byte-identical" || bad "Antigravity hooks.json changed after uninstall"
+
+# --- Codex CLI: install, run the hook as Codex would, uninstall --------------
+
+echo "== Codex CLI install/uninstall =="
+
+CODEX_TEST_HOME="$SCRATCH/codex-home"
+mkdir -p "$CODEX_TEST_HOME/.codex"
+printf '{"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "./mine.sh"}]}]}}' \
+  > "$CODEX_TEST_HOME/.codex/hooks.json"
+cp "$CODEX_TEST_HOME/.codex/hooks.json" "$SCRATCH/codex-hooks.orig"
+HOME="$CODEX_TEST_HOME" bash "$DIR/install.sh" >/dev/null
+
+codex_cmd=$(python3 -c 'import json,sys; g=json.load(open(sys.argv[1]))["hooks"]["PreToolUse"]; print(g[-1]["hooks"][0]["command"])' \
+  "$CODEX_TEST_HOME/.codex/hooks.json" 2>/dev/null || echo "")
+[[ "$codex_cmd" == CTX_GUARD_AGENT=codex-cli* ]] && ok "install adds the ctx-guard hook for Codex CLI" || bad "no ctx-guard hook in Codex hooks.json -> $codex_cmd"
+
+payload=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["tool_input"]["command"]="git status"; print(json.dumps(p))' \
+  "$DIR/tests/fixtures/codex/pre_tool_use_bash.json")
+out=$(echo "$payload" | HOME="$CODEX_TEST_HOME" sh -c "$codex_cmd")
+[[ "$out" == *'"updatedInput": {"command": "git status --porcelain=v1 -b"}'* ]] && ok "installed Codex hook rewrites Bash" || bad "Codex rewrite -> $out"
+
+HOME="$CODEX_TEST_HOME" python3 "$CODEX_TEST_HOME/.ctx-guard/bin/ctx-guard-uninstall" >/dev/null
+cmp -s "$SCRATCH/codex-hooks.orig" "$CODEX_TEST_HOME/.codex/hooks.json" \
+  && ok "uninstall restores Codex hooks.json byte-identical" || bad "Codex hooks.json changed after uninstall"
 
 # --- install/uninstall ownership safety -------------------------------------
 
