@@ -200,11 +200,11 @@ rm -rf /tmp/ctx-guard 2>/dev/null || true
 # versions, now superseded by the shared $DEST above.
 rm -rf "$HOME/.claude/ctx-guard" 2>/dev/null || true
 
-cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-recall" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
+cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-recall" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-try" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
 cp "$SRC"/hooks/*.py                   "$DEST/hooks/"
 cp "$SRC"/hooks/lib/*.py               "$DEST/hooks/lib/"
 cp "$SRC"/hooks/lib/popular_packages/*.txt "$DEST/hooks/lib/popular_packages/"
-chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-recall" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
+chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-recall" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-try" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
 
 python3 - "$MANIFEST" <<'PYEOF'
 import json
@@ -275,14 +275,16 @@ os.chmod(manifest_path, 0o600)
 PYEOF
 fi
 
-# Symlink recall/stats/uninstall into ~/.local/bin so they're callable as plain
-# commands (`ctx-guard-recall`, `ctx-guard-stats`, `ctx-guard-uninstall`) if
+# Symlink recall/stats/statusline/try/uninstall into ~/.local/bin so they're callable as
+# plain commands (`ctx-guard-recall`, `ctx-guard-stats`, ...) if
 # that dir is on PATH.
 # ctx-guard-run is intentionally not symlinked -- it's an internal wrapper
 # invoked by the hooks themselves, not something a user runs directly.
 mkdir -p "$LOCAL_BIN"
 ln -sf "$DEST/bin/ctx-guard-recall" "$LOCAL_BIN/ctx-guard-recall"
 ln -sf "$DEST/bin/ctx-guard-stats" "$LOCAL_BIN/ctx-guard-stats"
+ln -sf "$DEST/bin/ctx-guard-statusline" "$LOCAL_BIN/ctx-guard-statusline"
+ln -sf "$DEST/bin/ctx-guard-try" "$LOCAL_BIN/ctx-guard-try"
 ln -sf "$DEST/bin/ctx-guard-uninstall" "$LOCAL_BIN/ctx-guard-uninstall"
 case ":$PATH:" in
   *":$LOCAL_BIN:"*) ;;
@@ -466,6 +468,10 @@ manifest.update({
             os.path.join(dest, "bin", "ctx-guard-recall"),
         os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-stats"):
             os.path.join(dest, "bin", "ctx-guard-stats"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-statusline"):
+            os.path.join(dest, "bin", "ctx-guard-statusline"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-try"):
+            os.path.join(dest, "bin", "ctx-guard-try"),
         os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-uninstall"):
             os.path.join(dest, "bin", "ctx-guard-uninstall"),
     },
@@ -530,6 +536,7 @@ if has_agent copilot-cli; then echo "Copilot CLI: restart it, then verify with: 
 if has_agent antigravity-cli; then echo "Antigravity CLI: restart it, then verify with: /hooks"; fi
 if has_agent codex-cli; then echo "Codex CLI: restart it, then open /hooks and trust the ctx-guard hook (Codex skips it until you do)"; fi
 echo ""
+echo "See it work right now with:   ctx-guard-try"
 echo "Check savings any time with: ctx-guard-stats"
 echo "Uninstall any time with:     ctx-guard-uninstall"
 [ "$STATUSLINE" = 1 ] || echo "Optional live savings in the status line: rerun the install with --statusline"

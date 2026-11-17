@@ -39,6 +39,32 @@ Want to read the installer first? Download
 [`get.sh`](https://github.com/ctx-guard/install/blob/main/get.sh), look it
 over, and run `bash get.sh`. More install options are [below](#more-install-options).
 
+## Try it
+
+See ctx-guard catch a misspelled package and trim a 3,000-line test log, in
+a few seconds and without waiting for your agent to make a mistake:
+
+```bash
+ctx-guard try     # after curl: ctx-guard-try    from a clone: bin/ctx-guard-try
+```
+
+```
+1. Your agent tries to install a misspelled package
+   $ pip install reqeusts
+   ctx-guard blocked pip install reqeusts: no such package on registry (did you mean requests?).
+   Nothing was installed. …
+
+2. Your agent runs a test suite with 3,000 lines of output
+   The agent gets 81 lines instead. …
+
+3. Your agent pulls just the lines it needs from the full log
+   $ ctx-guard-recall show run-FXKIIwa6 --grep token
+   2999: using token [REDACTED TOKEN]
+```
+
+It runs the real hooks on made-up input, installs nothing, and leaves your
+stats alone. With Homebrew it works even before `ctx-guard install`.
+
 ## What you'll notice
 
 **Long output gets short.** When your agent runs your test suite, it gets the
@@ -105,8 +131,12 @@ Try `--gains` for savings per command, `--breakdown weekly` for trends, or
 ### In your status line
 
 ```bash
-ctx-guard install --statusline     # from a clone: bash install.sh --statusline
+ctx-guard install --statusline
 ```
+
+(With curl, rerun the installer with `| bash -s -- --statusline`; from a
+clone, `bash install.sh --statusline`. The same goes for the
+`--statusline-preset` below.)
 
 adds a live counter to the Claude Code and Copilot CLI status lines:
 

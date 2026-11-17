@@ -1,8 +1,13 @@
 # Status line
 
 ```bash
-bash install.sh --statusline
+ctx-guard install --statusline     # Homebrew
+curl -fsSL https://raw.githubusercontent.com/ctx-guard/install/main/get.sh | bash -s -- --statusline
+bash install.sh --statusline       # from a clone
 ```
+
+The examples below use `bash install.sh`; `ctx-guard install` and the curl
+command take the same options.
 
 Adds a live savings segment to the Claude Code and Copilot CLI status lines,
 for the agent you are in:

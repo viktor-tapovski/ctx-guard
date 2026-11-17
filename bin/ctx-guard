@@ -4,6 +4,7 @@
 #   ctx-guard install [--agents LIST] [--yes] [--statusline]
 #   ctx-guard uninstall [--agents LIST]
 #   ctx-guard stats|recall [...]
+#   ctx-guard try
 #   ctx-guard --version
 #
 # It runs the install.sh that ships beside it (a checkout, a release tarball
@@ -31,6 +32,8 @@ Usage: ctx-guard <command> [options]
               remove ctx-guard, for the listed agents only if given
   stats [...]     savings so far (ctx-guard-stats)
   recall [...]    get archived output back (ctx-guard-recall)
+  try             see ctx-guard catch a fake package and trim a test log;
+                  works before install too
   --version       print the version
 
 Agents: claude-code, copilot-cli, antigravity-cli, codex-cli, or all.
@@ -59,6 +62,8 @@ case "$command" in
   uninstall) run_installed ctx-guard-uninstall "$@" ;;
   stats)     run_installed ctx-guard-stats "$@" ;;
   recall)    run_installed ctx-guard-recall "$@" ;;
+  # The bundled copy, so it works before install.
+  try)       exec bash "$ROOT/bin/ctx-guard-try" "$@" ;;
   --version|version)
     sed -n 's/^__version__ = "\([^"]*\)".*/ctx-guard \1/p' "$ROOT/hooks/lib/version.py" ;;
   ""|-h|--help|help) usage ;;

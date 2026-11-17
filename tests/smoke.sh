@@ -768,9 +768,21 @@ mkdir -p "$CLI_HOME/.codex"
 [[ "$("$SCRATCH/ctx-guard-link" --version)" == "ctx-guard "* ]] && ok "ctx-guard --version through a symlink" || bad "ctx-guard --version failed"
 out=$(HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" stats 2>&1; echo "EXIT:$?")
 [[ "$out" == *"not installed yet"* && "$out" == *"EXIT:1"* ]] && ok "ctx-guard stats before install says to install" || bad "stats before install -> $out"
+# ctx-guard try works before install, offline, and leaves nothing behind.
+TRY_TMP="$SCRATCH/try-tmp"
+mkdir -p "$TRY_TMP"
+out=$(HOME="$CLI_HOME" TMPDIR="$TRY_TMP" https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
+  "$SCRATCH/ctx-guard-link" try 2>&1; echo "EXIT:$?")
+[[ "$out" == *"warned pip install reqeusts"*"did you mean requests?"* ]] && ok "ctx-guard try flags the typosquat offline" || bad "try pkg -> $out"
+[[ "$out" == *"using token [REDACTED"* && "$out" != *"ghp_A1b2"* ]] && ok "ctx-guard try shows the masked token" || bad "try redaction -> $out"
+[[ "$out" == *"EXIT:0"* ]] && ok "ctx-guard try exits 0" || bad "try exit -> $out"
+[ -z "$(ls -A "$TRY_TMP")" ] && [ ! -e "$CLI_HOME/.local/state" ] \
+  && ok "ctx-guard try leaves no files or stats behind" || bad "try left: $(ls -A "$TRY_TMP" "$CLI_HOME/.local" 2>&1)"
 HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" install --agents codex-cli >/dev/null
+[ -L "$CLI_HOME/.local/bin/ctx-guard-try" ] && [ -L "$CLI_HOME/.local/bin/ctx-guard-statusline" ] && HOME="$CLI_HOME" https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 "$CLI_HOME/.local/bin/ctx-guard-try" < /dev/null >/dev/null 2>&1 \
+  && ok "install links ctx-guard-statusline and a working ctx-guard-try" || bad "ctx-guard-try not linked or failing"
 HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" uninstall >/dev/null
-[ ! -e "$CLI_HOME/.ctx-guard" ] && [ ! -e "$CLI_HOME/.codex/hooks.json" ] \
+[ ! -e "$CLI_HOME/.ctx-guard" ] && [ ! -e "$CLI_HOME/.codex/hooks.json" ] && [ ! -L "$CLI_HOME/.local/bin/ctx-guard-try" ] && [ ! -L "$CLI_HOME/.local/bin/ctx-guard-statusline" ] \
   && ok "ctx-guard install then uninstall round-trips" || bad "ctx-guard install/uninstall left files"
 
 # --- install/uninstall ownership safety -------------------------------------
