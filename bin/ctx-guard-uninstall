@@ -99,6 +99,16 @@ def restore_statuslines(manifest: dict) -> None:
     statusline_config.restore(manifest)
 
 
+def remove_antigravity_hook(manifest: dict) -> None:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib"))
+    try:
+        import antigravity_config
+    except ImportError:
+        print("antigravity_config.py not found; leaving Antigravity CLI hooks as they are.")
+        return
+    antigravity_config.restore(manifest)
+
+
 def restore_agents(manifest: dict) -> None:
     for entry in manifest.get("agents", {}).values():
         path = Path(entry["path"])
@@ -168,6 +178,7 @@ def main() -> None:
 
     remove_claude_hooks(manifest)
     remove_copilot_hooks(manifest)
+    remove_antigravity_hook(manifest)
     restore_statuslines(manifest)
     restore_agents(manifest)
     remove_links(manifest)
@@ -188,7 +199,7 @@ def main() -> None:
     if persistent.exists():
         print(f"Kept persistent stats {persistent} (delete it manually or run ctx-guard-stats --reset first).")
 
-    print("Done. Restart Claude Code and Copilot CLI to pick up the changes.")
+    print("Done. Restart Claude Code, Copilot CLI and Antigravity CLI to pick up the changes.")
 
 
 if __name__ == "__main__":

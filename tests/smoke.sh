@@ -607,6 +607,31 @@ tool_output_line=$(grep '"kind":"tool_output"' "$CTX_GUARD_STATS_FILE" | grep '"
 bytes_recorded=$(echo "$tool_output_line" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["result_bytes"])' 2>/dev/null || echo "")
 [ "$bytes_recorded" = "400" ] && ok "tool_output result_bytes measured correctly (400)" || bad "result_bytes -> $bytes_recorded (want 400)"
 
+# --- Antigravity CLI: install, run the hook as agy would, uninstall ----------
+
+echo "== Antigravity CLI install/uninstall =="
+
+AGY_HOME="$SCRATCH/agy-home"
+mkdir -p "$AGY_HOME/.gemini/antigravity-cli" "$AGY_HOME/.gemini/config"
+printf '{ "other-hook": {"Stop": [{"command": "./x.sh"}]} }' > "$AGY_HOME/.gemini/config/hooks.json"
+cp "$AGY_HOME/.gemini/config/hooks.json" "$SCRATCH/agy-hooks.orig"
+HOME="$AGY_HOME" bash "$DIR/install.sh" >/dev/null
+
+agy_cmd=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(c["ctx-guard"]["PreToolUse"][0]["hooks"][0]["command"])' \
+  "$AGY_HOME/.gemini/config/hooks.json" 2>/dev/null || echo "")
+[ -n "$agy_cmd" ] && ok "install adds the ctx-guard hook for Antigravity CLI" || bad "no ctx-guard hook in Antigravity hooks.json"
+
+payload=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["toolCall"]["args"]["CommandLine"]="git status"; print(json.dumps(p))' \
+  "$DIR/tests/fixtures/antigravity/pre_tool_use_run_command.json")
+out=$(echo "$payload" | HOME="$AGY_HOME" sh -c "$agy_cmd")
+[[ "$out" == *'"CommandLine": "git status --porcelain=v1 -b"'* ]] && ok "installed agy hook rewrites run_command" || bad "agy rewrite -> $out"
+out=$(echo '{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}}}' | HOME="$AGY_HOME" sh -c "$agy_cmd")
+[ "$out" = '{"decision": "allow"}' ] && ok "installed agy hook prints an explicit allow on pass-through" || bad "agy pass-through -> $out"
+
+HOME="$AGY_HOME" python3 "$AGY_HOME/.ctx-guard/bin/ctx-guard-uninstall" >/dev/null
+cmp -s "$SCRATCH/agy-hooks.orig" "$AGY_HOME/.gemini/config/hooks.json" \
+  && ok "uninstall restores Antigravity hooks.json byte-identical" || bad "Antigravity hooks.json changed after uninstall"
+
 # --- install/uninstall ownership safety -------------------------------------
 
 echo "== install/uninstall ownership safety =="

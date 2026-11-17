@@ -36,6 +36,7 @@ from ctx_guard_common import (  # noqa: E402
     pending_key,
     prune_old,
     record_stats_event,
+    run_pretooluse_hook,
 )
 import pkg_install_check
 
@@ -345,4 +346,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_pretooluse_hook(main)
