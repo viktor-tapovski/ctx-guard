@@ -83,13 +83,16 @@ class JsonStatusLine:
 FORMATS = {"json": JsonStatusLine()}
 
 
-def install(manifest: dict, home: str, dest: str, python_bin: str) -> None:
+def install(manifest: dict, home: str, dest: str, python_bin: str,
+            selected: list[str] | None = None) -> None:
     """Point every installed agent's status line at ctx-guard-statusline,
     recording what was there before. Re-running never records our own
-    command as the user's."""
+    command as the user's. selected limits it to the agents the user chose."""
     entries = manifest.setdefault("statusline", {})
     script = os.path.join(dest, "bin", "ctx-guard-statusline")
     for target in TARGETS:
+        if selected is not None and target.agent not in selected:
+            continue
         if target.only_if_installed and not os.path.isdir(
                 os.path.join(home, target.only_if_installed)):
             continue
@@ -114,10 +117,13 @@ def install(manifest: dict, home: str, dest: str, python_bin: str) -> None:
         print(f"{target.agent} status line set in {path}")
 
 
-def restore(manifest: dict) -> None:
+def restore(manifest: dict, selected: list[str] | None = None) -> None:
     """Put back each agent's original status line, unless the user has
-    changed it since install."""
-    for agent, entry in manifest.get("statusline", {}).items():
+    changed it since install. selected limits it to those agents."""
+    for agent, entry in list(manifest.get("statusline", {}).items()):
+        if selected is not None and agent not in selected:
+            continue
+        manifest["statusline"].pop(agent)
         fmt = FORMATS.get(entry.get("format", "json"))
         path = entry["settings_file"]
         if fmt is None or not os.path.isfile(path):

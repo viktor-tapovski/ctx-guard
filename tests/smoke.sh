@@ -617,7 +617,7 @@ AGY_HOME="$SCRATCH/agy-home"
 mkdir -p "$AGY_HOME/.gemini/antigravity-cli" "$AGY_HOME/.gemini/config"
 printf '{ "other-hook": {"Stop": [{"command": "./x.sh"}]} }' > "$AGY_HOME/.gemini/config/hooks.json"
 cp "$AGY_HOME/.gemini/config/hooks.json" "$SCRATCH/agy-hooks.orig"
-HOME="$AGY_HOME" bash "$DIR/install.sh" >/dev/null
+HOME="$AGY_HOME" bash "$DIR/install.sh" --agents antigravity-cli >/dev/null
 
 agy_cmd=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(c["ctx-guard"]["PreToolUse"][0]["hooks"][0]["command"])' \
   "$AGY_HOME/.gemini/config/hooks.json" 2>/dev/null || echo "")
@@ -643,7 +643,7 @@ mkdir -p "$CODEX_TEST_HOME/.codex"
 printf '{"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "./mine.sh"}]}]}}' \
   > "$CODEX_TEST_HOME/.codex/hooks.json"
 cp "$CODEX_TEST_HOME/.codex/hooks.json" "$SCRATCH/codex-hooks.orig"
-HOME="$CODEX_TEST_HOME" bash "$DIR/install.sh" >/dev/null
+HOME="$CODEX_TEST_HOME" bash "$DIR/install.sh" --agents codex-cli >/dev/null
 
 codex_cmd=$(python3 -c 'import json,sys; g=json.load(open(sys.argv[1]))["hooks"]["PreToolUse"]; print(g[-1]["hooks"][0]["command"])' \
   "$CODEX_TEST_HOME/.codex/hooks.json" 2>/dev/null || echo "")
@@ -658,6 +658,121 @@ HOME="$CODEX_TEST_HOME" python3 "$CODEX_TEST_HOME/.ctx-guard/bin/ctx-guard-unins
 cmp -s "$SCRATCH/codex-hooks.orig" "$CODEX_TEST_HOME/.codex/hooks.json" \
   && ok "uninstall restores Codex hooks.json byte-identical" || bad "Codex hooks.json changed after uninstall"
 
+# --- Agent selection: --agents, detection, per-agent uninstall ---------------
+
+echo "== agent selection =="
+
+# Only /usr/bin and /bin on PATH, so agents installed on this machine
+# (claude, codex, ...) can't leak into detection.
+MIN_PATH="/usr/bin:/bin"
+json_eq() { python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])) != json.load(open(sys.argv[2])))' "$1" "$2"; }
+
+SEL_HOME="$SCRATCH/sel-home"
+mkdir -p "$SEL_HOME/.claude" "$SEL_HOME/.codex"
+printf '{"theme": "dark"}' > "$SEL_HOME/.claude/settings.json"
+cp "$SEL_HOME/.claude/settings.json" "$SCRATCH/sel-claude.orig"
+HOME="$SEL_HOME" bash "$DIR/install.sh" --agents codex-cli >/dev/null
+cmp -s "$SCRATCH/sel-claude.orig" "$SEL_HOME/.claude/settings.json" && [ ! -e "$SEL_HOME/.claude/agents" ] && [ ! -e "$SEL_HOME/.claude/CLAUDE.md" ] \
+  && ok "--agents codex-cli leaves Claude Code untouched" || bad "--agents codex-cli touched ~/.claude"
+[ ! -e "$SEL_HOME/.copilot" ] && ok "--agents codex-cli creates no ~/.copilot" || bad "~/.copilot created for an unselected agent"
+[ -f "$SEL_HOME/.codex/hooks.json" ] && ok "--agents codex-cli sets up Codex" || bad "Codex not set up"
+
+# Re-install with Claude added, then with Claude left out again: removed.
+HOME="$SEL_HOME" bash "$DIR/install.sh" --agents claude-code,codex-cli >/dev/null
+grep -q pre_bash_rewrite.py "$SEL_HOME/.claude/settings.json" && ok "re-install adds Claude Code" || bad "Claude Code not added"
+HOME="$SEL_HOME" bash "$DIR/install.sh" --agents codex-cli >/dev/null
+json_eq "$SCRATCH/sel-claude.orig" "$SEL_HOME/.claude/settings.json" && [ ! -e "$SEL_HOME/.claude/agents/researcher.md" ] \
+  && ok "re-install without Claude Code removes it" || bad "deselected Claude Code still set up"
+installed=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["installed_agents"]))' "$SEL_HOME/.ctx-guard/install-manifest.json")
+[ "$installed" = "codex-cli" ] && ok "manifest lists only the selected agents" || bad "installed_agents -> $installed"
+
+# Per-agent uninstall keeps the rest; a full uninstall then clears everything.
+HOME="$SEL_HOME" bash "$DIR/install.sh" --agents claude-code,codex-cli >/dev/null
+HOME="$SEL_HOME" python3 "$SEL_HOME/.ctx-guard/bin/ctx-guard-uninstall" --agents claude-code >/dev/null
+json_eq "$SCRATCH/sel-claude.orig" "$SEL_HOME/.claude/settings.json" && ok "uninstall --agents claude-code restores Claude Code" || bad "Claude Code settings not restored"
+grep -q CTX_GUARD_AGENT=codex-cli "$SEL_HOME/.codex/hooks.json" && [ -d "$SEL_HOME/.ctx-guard" ] \
+  && ok "uninstall --agents claude-code keeps Codex and ~/.ctx-guard" || bad "partial uninstall removed too much"
+HOME="$SEL_HOME" python3 "$SEL_HOME/.ctx-guard/bin/ctx-guard-uninstall" >/dev/null
+[ ! -e "$SEL_HOME/.codex/hooks.json" ] && [ ! -e "$SEL_HOME/.ctx-guard" ] && ok "full uninstall removes the rest" || bad "full uninstall left files"
+
+out=$(HOME="$SEL_HOME" bash "$DIR/install.sh" --agents nope 2>&1; echo "EXIT:$?")
+[[ "$out" == *"unknown agent nope"* && "$out" == *"EXIT:2"* ]] && ok "unknown --agents value rejected" || bad "--agents nope -> $out"
+
+# No --agents and no terminal: the detected agents only.
+DET_HOME="$SCRATCH/det-home"
+mkdir -p "$DET_HOME/.copilot"
+HOME="$DET_HOME" PATH="$MIN_PATH" bash "$DIR/install.sh" < /dev/null >/dev/null
+[ -f "$DET_HOME/.copilot/hooks/ctx-guard.json" ] && [ ! -e "$DET_HOME/.claude" ] \
+  && ok "without --agents, only detected agents are set up" || bad "detection install wrong"
+EMPTY_HOME="$SCRATCH/empty-home"
+mkdir -p "$EMPTY_HOME"
+out=$(HOME="$EMPTY_HOME" PATH="$MIN_PATH" bash "$DIR/install.sh" < /dev/null 2>&1; echo "EXIT:$?")
+[[ "$out" == *"No supported agent found"* && "$out" == *"EXIT:1"* && ! -e "$EMPTY_HOME/.ctx-guard" ]] \
+  && ok "nothing detected and no --agents: stops before writing" || bad "empty detection -> $out"
+
+# --- curl installer (get.sh) and the ctx-guard command ------------------------
+
+echo "== get.sh and ctx-guard =="
+
+sha256_file() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+
+# A release-shaped tarball of the working tree: one top-level directory.
+STAGE="$SCRATCH/stage/ctx-guard-9.9.9"
+mkdir -p "$STAGE"
+cp -R "$DIR/install.sh" "$DIR/bin" "$DIR/hooks" "$DIR/agents" "$STAGE/"
+find "$STAGE" -name __pycache__ -prune -exec rm -rf {} +
+tar -czf "$SCRATCH/ctx-guard-9.9.9.tar.gz" -C "$SCRATCH/stage" ctx-guard-9.9.9
+GOOD_SHA=$(sha256_file "$SCRATCH/ctx-guard-9.9.9.tar.gz")
+
+GET_HOME="$SCRATCH/get-home"
+mkdir -p "$GET_HOME/.codex"
+out=$(HOME="$GET_HOME" CTX_GUARD_VERSION=9.9.9 CTX_GUARD_SHA256="$GOOD_SHA" \
+  CTX_GUARD_TARBALL_URL="file://$SCRATCH/ctx-guard-9.9.9.tar.gz" \
+  bash "$DIR/get.sh" --agents codex-cli < /dev/null 2>&1; echo "EXIT:$?")
+[[ "$out" == *"Checksum verified."* && "$out" == *"EXIT:0"* ]] && grep -q CTX_GUARD_AGENT=codex-cli "$GET_HOME/.codex/hooks.json" \
+  && ok "get.sh verifies the tarball and installs with the given --agents" || bad "get.sh install -> $out"
+
+TAMPER_HOME="$SCRATCH/tamper-home"
+mkdir -p "$TAMPER_HOME/.codex"
+out=$(HOME="$TAMPER_HOME" CTX_GUARD_VERSION=9.9.9 CTX_GUARD_SHA256="$(printf '0%.0s' {1..64})" \
+  CTX_GUARD_TARBALL_URL="file://$SCRATCH/ctx-guard-9.9.9.tar.gz" \
+  bash "$DIR/get.sh" --agents codex-cli < /dev/null 2>&1; echo "EXIT:$?")
+[[ "$out" == *"checksum mismatch"* && "$out" == *"EXIT:1"* && ! -e "$TAMPER_HOME/.ctx-guard" && ! -e "$TAMPER_HOME/.codex/hooks.json" ]] \
+  && ok "get.sh aborts on a checksum mismatch with nothing written" || bad "tampered get.sh -> $out"
+
+out=$(HOME="$TAMPER_HOME" bash "$DIR/get.sh" < /dev/null 2>&1; echo "EXIT:$?")
+[[ "$out" == *"unreleased get.sh"* && "$out" == *"EXIT:1"* ]] && ok "unstamped get.sh refuses to run" || bad "unstamped get.sh -> $out"
+
+# A rendered release: get.sh carries the version and checksum itself.
+bash "$DIR/packaging/render.sh" 9.9.9 "$GOOD_SHA" "$SCRATCH/dist" >/dev/null
+if grep -q '@VERSION@\|@SHA256@' "$SCRATCH/dist/get.sh" "$SCRATCH/dist/ctx-guard.rb"; then
+  bad "render.sh left placeholders"
+else
+  ok "render.sh fills get.sh and the formula"
+fi
+if command -v ruby >/dev/null 2>&1; then
+  ruby -c "$SCRATCH/dist/ctx-guard.rb" >/dev/null && ok "rendered formula is valid Ruby" || bad "rendered formula has a Ruby syntax error"
+fi
+RENDER_HOME="$SCRATCH/render-home"
+mkdir -p "$RENDER_HOME/.codex"
+out=$(HOME="$RENDER_HOME" CTX_GUARD_TARBALL_URL="file://$SCRATCH/ctx-guard-9.9.9.tar.gz" \
+  bash "$SCRATCH/dist/get.sh" --agents codex-cli < /dev/null 2>&1; echo "EXIT:$?")
+[[ "$out" == *"Downloading ctx-guard 9.9.9"* && "$out" == *"EXIT:0"* ]] && ok "rendered get.sh installs with its stamped checksum" || bad "rendered get.sh -> $out"
+out=$(bash "$DIR/packaging/render.sh" 9.9 "$GOOD_SHA" "$SCRATCH/dist2" 2>&1; echo "EXIT:$?")
+[[ "$out" == *"bad version"* && "$out" == *"EXIT:2"* ]] && ok "render.sh rejects a malformed version" || bad "render.sh bad version -> $out"
+
+# ctx-guard through a symlink, as Homebrew links it.
+ln -s "$DIR/bin/ctx-guard" "$SCRATCH/ctx-guard-link"
+CLI_HOME="$SCRATCH/cli-home"
+mkdir -p "$CLI_HOME/.codex"
+[[ "$("$SCRATCH/ctx-guard-link" --version)" == "ctx-guard "* ]] && ok "ctx-guard --version through a symlink" || bad "ctx-guard --version failed"
+out=$(HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" stats 2>&1; echo "EXIT:$?")
+[[ "$out" == *"not installed yet"* && "$out" == *"EXIT:1"* ]] && ok "ctx-guard stats before install says to install" || bad "stats before install -> $out"
+HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" install --agents codex-cli >/dev/null
+HOME="$CLI_HOME" "$SCRATCH/ctx-guard-link" uninstall >/dev/null
+[ ! -e "$CLI_HOME/.ctx-guard" ] && [ ! -e "$CLI_HOME/.codex/hooks.json" ] \
+  && ok "ctx-guard install then uninstall round-trips" || bad "ctx-guard install/uninstall left files"
+
 # --- install/uninstall ownership safety -------------------------------------
 
 echo "== install/uninstall ownership safety =="
@@ -665,7 +780,7 @@ echo "== install/uninstall ownership safety =="
 FAKE_HOME="$SCRATCH/fake-home"
 mkdir -p "$FAKE_HOME/.claude/agents"
 echo "user-maintained researcher agent" > "$FAKE_HOME/.claude/agents/researcher.md"
-HOME="$FAKE_HOME" bash "$DIR/install.sh" >/dev/null
+HOME="$FAKE_HOME" bash "$DIR/install.sh" --agents claude-code,copilot-cli >/dev/null
 
 if python3 - "$FAKE_HOME/.claude/settings.json" <<'PY'
 import json, sys
@@ -960,8 +1075,8 @@ out=$(sl claude-code)
 SL_HOME="$SCRATCH/sl-home"
 mkdir -p "$SL_HOME/.claude"
 echo '{"statusLine": {"type": "command", "command": "echo base", "padding": 1}}' > "$SL_HOME/.claude/settings.json"
-HOME="$SL_HOME" bash "$DIR/install.sh" --statusline >/dev/null
-HOME="$SL_HOME" bash "$DIR/install.sh" --statusline >/dev/null
+HOME="$SL_HOME" bash "$DIR/install.sh" --agents claude-code,copilot-cli --statusline >/dev/null
+HOME="$SL_HOME" bash "$DIR/install.sh" --agents claude-code,copilot-cli --statusline >/dev/null
 out=$(echo '{}' | CTX_GUARD_STATS_FILE="$sl_file" python3 -c 'import json,subprocess,sys
 cmd = json.load(open(sys.argv[1]))["statusLine"]["command"]
 print(subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True).stdout, end="")' "$SL_HOME/.claude/settings.json")

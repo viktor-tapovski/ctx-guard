@@ -111,7 +111,8 @@ captured from a live session.
 ## Runtime requirements
 
 - Bash with standard Unix command-line tools.
-- Python 3.10 or newer.
+- Python 3.9 or newer (macOS's own `/usr/bin/python3` is 3.9). `install.sh` uses the
+  first new-enough `python3` on your PATH, or `CTX_GUARD_PYTHON` if set.
 - A Claude Code, GitHub Copilot CLI, Antigravity CLI or Codex CLI version that supports the hook events
   used by the installation script.
 - macOS or Linux. Windows is not currently tested.

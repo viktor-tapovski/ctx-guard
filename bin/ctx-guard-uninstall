@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Safely remove ctx-guard files recorded by the installation manifest."""
+"""Safely remove ctx-guard files recorded by the installation manifest.
+
+  ctx-guard-uninstall                     remove ctx-guard for every agent
+  ctx-guard-uninstall --agents a,b        remove it for those agents only
+  ctx-guard-uninstall --keep-shared ...   keep ~/.ctx-guard even if no agent
+                                          is left (install.sh uses this)
+"""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +19,7 @@ HOME = Path(os.path.expanduser("~"))
 DEST = HOME / ".ctx-guard"
 MANIFEST_PATH = DEST / "install-manifest.json"
 RUN_DIR = Path(os.environ.get("CTX_GUARD_RUNTIME_ROOT") or f"/tmp/ctx-guard-{os.getuid()}")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib"))
 
 
 def sha256(path: Path) -> str:
@@ -36,6 +43,8 @@ def load_manifest() -> dict | None:
 
 
 def remove_claude_hooks(manifest: dict) -> None:
+    if not manifest.get("claude_settings"):
+        return
     settings_path = Path(manifest["claude_settings"])
     commands = set(manifest.get("claude_hook_commands", []))
     if not settings_path.is_file():
@@ -77,6 +86,8 @@ def remove_claude_hooks(manifest: dict) -> None:
 
 
 def remove_copilot_hooks(manifest: dict) -> None:
+    if not manifest.get("copilot_hooks_file"):
+        return
     path = Path(manifest["copilot_hooks_file"])
     if not path.is_file():
         print("No manifest-owned Copilot CLI hooks file found, skipping.")
@@ -89,24 +100,22 @@ def remove_copilot_hooks(manifest: dict) -> None:
     print(f"Removed {path}")
 
 
-def restore_statuslines(manifest: dict) -> None:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib"))
+def restore_statusline(manifest: dict, agent: str) -> None:
     try:
         import statusline_config
     except ImportError:
         print("statusline_config.py not found; leaving status lines as they are.")
         return
-    statusline_config.restore(manifest)
+    statusline_config.restore(manifest, [agent])
 
 
-def remove_agent_hooks(manifest: dict) -> None:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "hooks", "lib"))
+def remove_agent_hooks(manifest: dict, agent: str) -> None:
     try:
         import agent_hooks
     except ImportError:
         print("agent_hooks.py not found; leaving Antigravity CLI and Codex CLI hooks as they are.")
         return
-    agent_hooks.restore(manifest)
+    agent_hooks.restore(manifest, [agent])
 
 
 def restore_agents(manifest: dict) -> None:
@@ -136,6 +145,8 @@ def remove_links(manifest: dict) -> None:
 
 
 def remove_rules(manifest: dict) -> None:
+    if not manifest.get("claude_md"):
+        return
     claude_md = Path(manifest["claude_md"])
     rules_file = Path(manifest["claude_rules_file"])
     expected_hash = manifest.get("claude_rules_sha256")
@@ -152,6 +163,90 @@ def remove_rules(manifest: dict) -> None:
     updated = content.replace("\n" + block, "", 1).replace(block, "", 1)
     claude_md.write_text(updated, encoding="utf-8")
     print(f"Removed manifest-owned rules from {claude_md}")
+
+
+# What each agent's uninstall runs, and the manifest keys it owns.
+def remove_claude_code(manifest: dict) -> None:
+    remove_claude_hooks(manifest)
+    restore_agents(manifest)
+    remove_rules(manifest)
+    restore_statusline(manifest, "claude-code")
+
+
+def remove_copilot_cli(manifest: dict) -> None:
+    remove_copilot_hooks(manifest)
+    restore_statusline(manifest, "copilot-cli")
+
+
+REMOVERS = {
+    "claude-code": remove_claude_code,
+    "copilot-cli": remove_copilot_cli,
+    "antigravity-cli": lambda manifest: remove_agent_hooks(manifest, "antigravity-cli"),
+    "codex-cli": lambda manifest: remove_agent_hooks(manifest, "codex-cli"),
+}
+OWNED_KEYS = {
+    "claude-code": ("claude_settings", "claude_hook_commands", "claude_md", "claude_rules_file",
+                    "claude_rules_sha256", "agents"),
+    "copilot-cli": ("copilot_hooks_file", "copilot_hooks_sha256"),
+}
+
+
+def installed_agents(manifest: dict) -> list[str]:
+    """Agents this install set up. Manifests from before agent selection
+    have no installed_agents list; their keys tell."""
+    if "installed_agents" in manifest:
+        return list(manifest["installed_agents"])
+    found = []
+    if manifest.get("claude_settings"):
+        found.append("claude-code")
+    if manifest.get("copilot_hooks_file"):
+        found.append("copilot-cli")
+    return found + [agent for agent in manifest.get("hook_files", {}) if agent in REMOVERS]
+
+
+def save_manifest(manifest: dict) -> None:
+    temporary = MANIFEST_PATH.with_suffix(".json.tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, MANIFEST_PATH)
+
+
+def remove_shared(manifest: dict) -> None:
+    remove_links(manifest)
+    if DEST.is_dir():
+        shutil.rmtree(DEST)
+        print(f"Removed {DEST}")
+    if RUN_DIR.is_dir() or RUN_DIR.is_symlink():
+        if RUN_DIR.is_symlink():
+            RUN_DIR.unlink()
+        else:
+            shutil.rmtree(RUN_DIR)
+        print(f"Removed runtime dir {RUN_DIR}")
+
+    xdg = os.environ.get("XDG_STATE_HOME") or str(HOME / ".local" / "state")
+    persistent = Path(xdg) / "ctx-guard" / "stats.jsonl"
+    if persistent.exists():
+        print(f"Kept persistent stats {persistent} (delete it manually or run ctx-guard-stats --reset first).")
+
+
+def parse_args(argv: list[str]) -> tuple[list[str] | None, bool]:
+    selected, keep_shared = None, False
+    args = iter(argv)
+    for arg in args:
+        if arg == "--keep-shared":
+            keep_shared = True
+        elif arg == "--agents" or arg.startswith("--agents="):
+            value = arg.partition("=")[2] if "=" in arg else next(args, "")
+            import agents
+            try:
+                selected = agents.parse(value)
+            except ValueError as e:
+                raise SystemExit(f"ctx-guard-uninstall: {e}")
+        else:
+            print(__doc__.strip().split("\n\n", 1)[1], file=sys.stderr)
+            raise SystemExit(0 if arg in ("-h", "--help") else 2)
+    return selected, keep_shared
 
 
 def ctx_guard_version() -> str:
@@ -171,36 +266,31 @@ def main() -> None:
         print(f"ctx-guard {ctx_guard_version()}")
         return
 
-    print("Uninstalling ctx-guard ...")
+    selected, keep_shared = parse_args(sys.argv[1:])
     manifest = load_manifest()
     if manifest is None:
         return
+    installed = installed_agents(manifest)
+    targets = installed if selected is None else selected
+    print(f"Uninstalling ctx-guard for: {', '.join(targets) or 'nothing'} ...")
 
-    remove_claude_hooks(manifest)
-    remove_copilot_hooks(manifest)
-    remove_agent_hooks(manifest)
-    restore_statuslines(manifest)
-    restore_agents(manifest)
-    remove_links(manifest)
-    remove_rules(manifest)
+    for agent in targets:
+        if agent not in installed:
+            print(f"ctx-guard is not set up for {agent}; skipping.")
+            continue
+        REMOVERS[agent](manifest)
+        for key in OWNED_KEYS.get(agent, ()):
+            manifest.pop(key, None)
+    remaining = [agent for agent in installed if agent not in targets]
+    manifest["installed_agents"] = remaining
 
-    if DEST.is_dir():
-        shutil.rmtree(DEST)
-        print(f"Removed {DEST}")
-    if RUN_DIR.is_dir() or RUN_DIR.is_symlink():
-        if RUN_DIR.is_symlink():
-            RUN_DIR.unlink()
-        else:
-            shutil.rmtree(RUN_DIR)
-        print(f"Removed runtime dir {RUN_DIR}")
-
-    xdg = os.environ.get("XDG_STATE_HOME") or str(HOME / ".local" / "state")
-    persistent = Path(xdg) / "ctx-guard" / "stats.jsonl"
-    if persistent.exists():
-        print(f"Kept persistent stats {persistent} (delete it manually or run ctx-guard-stats --reset first).")
-
-    print("Done. Restart Claude Code, Copilot CLI, Antigravity CLI and Codex CLI to pick up the changes.")
-
+    if remaining or keep_shared:
+        save_manifest(manifest)
+        if remaining:
+            print(f"ctx-guard stays set up for: {', '.join(remaining)}")
+    else:
+        remove_shared(manifest)
+    print("Done. Restart the agents you changed to pick up the changes.")
 
 if __name__ == "__main__":
     main()

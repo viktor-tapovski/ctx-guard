@@ -156,15 +156,39 @@ permission rules still apply. Bounded calls are counted under OBSERVED in
 
 ## Install
 
+Pick one:
+
 ```bash
-bash install.sh
+# Homebrew (macOS, Linux)
+brew install ctx-guard/tap/ctx-guard
+ctx-guard install
+
+# curl: downloads the release tarball and checks its SHA-256 before running anything
+curl -fsSL https://raw.githubusercontent.com/ctx-guard/install/main/get.sh | bash
+
+# From a clone
+git clone https://github.com/viktor-tapovski/ctx-guard.git && cd ctx-guard && bash install.sh
 ```
 
-This installs shared files to `~/.ctx-guard/` (used by both tools) and then:
+The installer shows a checklist of the agents it supports, with the ones found on this machine already ticked. Use the arrow keys to move, space to select, and enter to continue. To skip the checklist, name the agents:
+
+```bash
+ctx-guard install --agents claude-code,codex-cli    # or: bash install.sh --agents ...
+curl -fsSL .../get.sh | bash -s -- --agents all     # claude-code, copilot-cli, antigravity-cli, codex-cli
+```
+
+With no terminal and no `--agents` (CI, scripts) or with `--yes`, it sets up the agents it detects. To review the curl installer first, download [`get.sh`](https://github.com/ctx-guard/install/blob/main/get.sh), read it, and run `bash get.sh`.
+
+Shared files go to `~/.ctx-guard/`, then for each agent you chose:
 - **Claude Code**: merges hooks into `~/.claude/settings.json` (backup saved as `.bak`), installs the three subagents to `~/.claude/agents/`, and appends guard rules to `~/.claude/CLAUDE.md`.
 - **Copilot CLI**: writes `~/.copilot/hooks/ctx-guard.json` wiring the rewrite, Read/Grep bound and stats hooks.
+- **Antigravity CLI** and **Codex CLI**: add a ctx-guard hook to `~/.gemini/config/hooks.json` and `~/.codex/hooks.json`; see [docs/compatibility.md](docs/compatibility.md) for what works there.
 
-Idempotent — safe to re-run. Restart each tool: verify Claude Code with `/hooks` and `/agents`; verify Copilot CLI with `/env` (look for `ctx-guard.json` under hooks).
+Idempotent: safe to re-run. Re-running with an agent left out removes ctx-guard from that agent. Restart each tool: verify Claude Code with `/hooks` and `/agents`; Copilot CLI with `/env` (look for `ctx-guard.json` under hooks); Antigravity CLI with `/hooks`. Codex CLI runs the hook only after you trust it in `/hooks`.
+
+Needs bash and Python 3.9 or newer; the installer uses the first new-enough `python3` on your `PATH`, or `CTX_GUARD_PYTHON`. After `brew upgrade ctx-guard`, run `ctx-guard install` again, because the hooks are copied into `~/.ctx-guard`.
+
+To remove ctx-guard from one agent and keep the rest: `ctx-guard-uninstall --agents codex-cli`. With no `--agents`, it removes everything.
 
 ## Statistics
 
