@@ -1067,6 +1067,8 @@ path, agent, kind, offset, n = sys.argv[1:6]
 ev = {"ts": time.time() + float(offset), "kind": kind, "agent": agent}
 if kind == "ctx_guard_run":
     ev.update(original_bytes=int(n) + 400, returned_bytes=400)
+elif kind == "tool_output":
+    ev.update(tool_name=n, result_bytes=100)
 else:
     ev.update(est_saved_bytes=int(n))
 with open(path, "a") as f:
@@ -1098,6 +1100,16 @@ r = json.load(open(sys.argv[1])); r["day"] = "2000-01-01"; json.dump(r, open(sys
 PY
 out=$(sl claude-code)
 [ "$out" = "ctx-guard ⬇ today 0 · total 13.0k (~1.0k)" ] && ok "midnight rollover resets today" || bad "rollover -> $out"
+sl_event claude-code tool_output 0 Bash
+sl_event claude-code tool_output 0 Read
+sl_event claude-code tool_output 0 Edit
+sl_event copilot-cli tool_output 0 bash
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 0 · 2 checked · total 13.0k (~1.0k)" ] \
+  && ok "nothing saved today shows the calls checked" || bad "checked -> $out"
+sl_event claude-code ctx_guard_run 0 4000
+out=$(sl claude-code)
+[ "$out" = "ctx-guard ⬇ today 1.0k · total 14.0k (~1.0k)" ] && ok "a saving replaces the checked count" || bad "checked then saved -> $out"
 
 head -1 "$sl_file" > "$sl_file.tmp" && cat "$sl_file.tmp" > "$sl_file"
 out=$(sl claude-code)
