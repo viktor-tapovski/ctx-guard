@@ -6,7 +6,10 @@ token savings, for Claude Code and Copilot CLI (`./install.sh --statusline`).
   ctx-guard ⬇ today 12.4k (~3.1k) · total 1.2M (~240k)
 
 Plain numbers are MEASURED savings, `(~...)` are ESTIMATED ones (same split as
-ctx-guard-stats). "today" is since local midnight, by each event's own ts.
+ctx-guard-stats). "today" is since local midnight, by each event's own ts. With
+nothing saved yet today, it shows how many tool calls ctx-guard checked instead:
+
+  ctx-guard ⬇ today 0 · 42 checked · total 1.2M (~240k)
 
 The status line runs after every assistant message, so it never rescans
 stats.jsonl: an incremental rollup (stats.rollup.json, next to it) keeps the
@@ -39,10 +42,12 @@ import subprocess
 import sys
 import time
 
-ROLLUP_VERSION = 2
+ROLLUP_VERSION = 3
 CHAIN_TIMEOUT_S = 5
 STDIN_TIMEOUT_S = 1
 CHAINING_MARKER = "CTX_GUARD_STATUSLINE_CHAINING"
+# Normalized by the hooks: Antigravity's run_command and Codex's shell are "Bash".
+CHECKED_TOOLS = {"bash", "read", "grep", "view"}
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..",
                                 "hooks", "lib"))
 
@@ -75,6 +80,14 @@ def event_savings(ev: dict) -> tuple[int, int]:
     if kind == "rewrite_estimate":
         return 0, ev.get("est_saved_bytes", 0)
     return 0, 0
+
+
+def event_checked(ev: dict) -> int:
+    """1 for a tool call the PreToolUse hooks look at (shell, Read, Grep), as
+    reported by the PostToolUse hook."""
+    if ev.get("kind") != "tool_output":
+        return 0
+    return int(str(ev.get("tool_name", "")).lower() in CHECKED_TOOLS)
 
 
 def event_security(ev: dict) -> tuple[int, int]:
@@ -111,6 +124,7 @@ def update_rollup(path: str, rollup_path: str) -> dict:
     if rollup["day"] != day:
         for totals in rollup["agents"].values():
             totals["today"] = [0, 0]
+            totals["checked_today"] = 0
         rollup["day"] = day
 
     if rollup["offset"] == st.st_size:
@@ -129,14 +143,16 @@ def update_rollup(path: str, rollup_path: str) -> dict:
         try:
             measured, estimated = (int(n) for n in event_savings(ev))
             flagged, redacted = event_security(ev)
-            if not measured and not estimated and not flagged and not redacted:
+            checked = event_checked(ev)
+            if not measured and not estimated and not flagged and not redacted and not checked:
                 continue
             today = time.strftime("%Y-%m-%d", time.localtime(float(ev.get("ts", 0)))) == day
             agent = str(ev.get("agent", "unknown"))
         except (AttributeError, TypeError, ValueError, OverflowError, OSError):
             continue
         totals = rollup["agents"].setdefault(
-            agent, {"today": [0, 0], "total": [0, 0], "pkg_flagged": 0, "redacted": 0})
+            agent, {"today": [0, 0], "total": [0, 0], "pkg_flagged": 0, "redacted": 0,
+                    "checked_today": 0})
         totals["pkg_flagged"] += flagged
         totals["redacted"] += redacted
         totals["total"][0] += measured
@@ -144,6 +160,7 @@ def update_rollup(path: str, rollup_path: str) -> dict:
         if today:
             totals["today"][0] += measured
             totals["today"][1] += estimated
+            totals["checked_today"] += checked
     rollup["offset"] += end
 
     temporary = f"{rollup_path}.{os.getpid()}.tmp"
@@ -168,6 +185,13 @@ def pair(measured: int, estimated: int) -> str:
     return f"{text} (~{fmt_tokens(estimated)})" if estimated else text
 
 
+def today_pair(totals: dict) -> str:
+    checked = totals.get("checked_today", 0)
+    if not any(totals["today"]) and checked:
+        return f"0 · {checked} checked"
+    return pair(*totals["today"])
+
+
 def agent_totals(agent: str) -> dict | None:
     path = stats_file()
     if not os.path.isfile(path):
@@ -181,7 +205,7 @@ def segment(agent: str) -> str:
     totals = agent_totals(agent)
     if not totals or not any(totals["total"]):
         return ""
-    return (f"ctx-guard ⬇ today {pair(*totals['today'])}"
+    return (f"ctx-guard ⬇ today {today_pair(totals)}"
             f" · total {pair(*totals['total'])}")
 
 

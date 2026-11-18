@@ -27,6 +27,19 @@ every refresh it keeps an incremental rollup, `stats.rollup.json`, next to
 does not drain sandbox spools, so it can trail `ctx-guard-stats` by one tool
 call. With no stats or no savings yet the segment is empty.
 
+On a day with nothing saved yet, "today" shows how many tool calls ctx-guard
+checked instead of a bare 0, so you can see it's running:
+
+```
+ctx-guard ⬇ today 0 · 42 checked · total 1.2M (~240k)
+```
+
+A zero is normal when the agent already bounds its own commands, for example
+by following the rules ctx-guard adds to `CLAUDE.md`: the hooks then have
+nothing to trim, and ctx-guard can't measure what the agent never ran. The
+count covers shell commands and Read and Grep calls, the ones its hooks look
+at.
+
 In Copilot CLI the segment shows in the footer's `custom` item; if you don't
 see it, turn that item on in Copilot's footer settings. The agents and their
 config files are listed in one place, `TARGETS` in
@@ -65,6 +78,7 @@ anything.
 | `{today_est}` `{total_est}` | estimated savings |
 | `{today_all}` `{total_all}` | measured plus estimated |
 | `{today_pair}` `{total_pair}` | `measured (~estimated)`, as in the default segment |
+| `{checked}` | tool calls ctx-guard checked today (shell commands, Read, Grep); `{today_all}` and `{today_pair}` add `· N checked` on a day with nothing saved yet |
 | `{pkg_flagged}` | package installs warned or blocked |
 | `{redacted}` | archived outputs that had secrets masked |
 | `{model}` `{context_pct}` `{context_bar}` `{cwd}` | from the status line's stdin; empty when the agent doesn't send them |

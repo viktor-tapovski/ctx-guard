@@ -42,8 +42,10 @@ PRESETS: dict[str, dict] = {
 SAVINGS_FIELDS = ("today", "total", "today_est", "total_est", "today_all", "total_all",
                   "today_pair", "total_pair")
 SECURITY_FIELDS = ("pkg_flagged", "redacted")
+ACTIVITY_FIELDS = ("checked",)
 SESSION_FIELDS = ("model", "context_pct", "context_bar", "cwd")
-FIELDS = frozenset(SAVINGS_FIELDS + SECURITY_FIELDS + SESSION_FIELDS + ("agent",))
+FIELDS = frozenset(SAVINGS_FIELDS + SECURITY_FIELDS + ACTIVITY_FIELDS + SESSION_FIELDS
+                   + ("agent",))
 
 # Same thresholds as hooks/context_monitor.py's warnings (THRESHOLDS).
 COLOR_THRESHOLDS = ((85, "red"), (70, "yellow"), (50, "green"))
@@ -234,20 +236,29 @@ def values_for(totals: dict | None, session: dict[str, str], agent: str,
 
     pkg_flagged = int(totals.get("pkg_flagged", 0))
     redacted = int(totals.get("redacted", 0))
+    checked = int(totals.get("checked_today", 0))
+
+    def today_or_checked(text: str, shown: int) -> str:
+        # Nothing saved yet today: show that ctx-guard is checking calls.
+        return f"{text} · {checked} checked" if not shown and checked else text
+
     values = {
         "today": fmt(today_m), "total": fmt(total_m),
         "today_est": est(today_e), "total_est": est(total_e),
-        "today_all": fmt(today_m + (today_e if show_est else 0)),
+        "today_all": today_or_checked(fmt(today_m + (today_e if show_est else 0)),
+                                      today_m + (today_e if show_est else 0)),
         "total_all": fmt(total_m + (total_e if show_est else 0)),
-        "today_pair": pair(today_m, today_e), "total_pair": pair(total_m, total_e),
-        "pkg_flagged": str(pkg_flagged), "redacted": str(redacted),
+        "today_pair": today_or_checked(pair(today_m, today_e),
+                                       today_m + (today_e if show_est else 0)),
+        "total_pair": pair(total_m, total_e),
+        "pkg_flagged": str(pkg_flagged), "redacted": str(redacted), "checked": str(checked),
         "agent": agent,
     }
     values.update(session)
     # Savings fields count as non-zero on any total: today is a subset of it.
     savings = total_m + total_e
     raw = {name: savings for name in SAVINGS_FIELDS}
-    raw.update(pkg_flagged=pkg_flagged, redacted=redacted)
+    raw.update(pkg_flagged=pkg_flagged, redacted=redacted, checked=checked)
     return values, raw
 
 
