@@ -7,4 +7,3 @@ packaging/ export-ignore
 commitlint.config.cjs export-ignore
 release-please-config.json export-ignore
 .release-please-manifest.json export-ignore
-docs/launch.md export-ignore
