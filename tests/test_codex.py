@@ -51,7 +51,7 @@ class CodexHookTest(HookTestCase):
                 codex_text = self.run_hook(self.codex_payload(command), "codex-cli")
                 claude = json.loads(claude_text)["hookSpecificOutput"] if claude_text.strip() else {}
                 wrapped = "ctx-guard-run" in claude.get("updatedInput", {}).get("command", "")
-                if not claude or (wrapped and claude.get("permissionDecision") == "allow"):
+                if not claude or (wrapped and claude.get("permissionDecision") != "ask"):
                     # Codex may treat "allow" as approval, so wrapped commands pass through.
                     self.assertEqual(codex_text, "")
                     continue
@@ -68,8 +68,13 @@ class CodexHookTest(HookTestCase):
                     self.assertTrue(codex["systemMessage"].startswith("ctx-guard warned"))
                     self.assertIn(codex["systemMessage"], spec["additionalContext"])
                     continue
-                self.assertEqual(spec.get("permissionDecision"), claude.get("permissionDecision"))
-                self.assertEqual(spec.get("permissionDecisionReason"), claude.get("permissionDecisionReason"))
+                if "updatedInput" in claude:
+                    # Codex applies a rewrite only with "allow"; Claude gets no decision.
+                    self.assertNotIn("permissionDecision", claude)
+                    self.assertEqual(spec["permissionDecision"], "allow")
+                else:
+                    self.assertEqual(spec.get("permissionDecision"), claude.get("permissionDecision"))
+                    self.assertEqual(spec.get("permissionDecisionReason"), claude.get("permissionDecisionReason"))
                 if "updatedInput" in claude:
                     expected = claude["updatedInput"]["command"].replace(
                         "--filter claude-code", "--filter codex-cli")

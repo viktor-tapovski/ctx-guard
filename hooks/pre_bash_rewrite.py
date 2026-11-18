@@ -345,7 +345,13 @@ def main() -> None:
             # A pkg warning must surface the human permission prompt, not auto-approve.
             decision = build_pretooluse_decision(reason=reason, new_args=new_args, decision="ask")
         else:
-            decision = build_pretooluse_decision(reason=reason, new_args=new_args)
+            # No permission decision: "allow" would skip the agent's own
+            # approval rules for whatever command was wrapped. Codex is the
+            # exception, since it applies a rewrite only with "allow" (and
+            # gets only read-only rewrites, see above).
+            decision = build_pretooluse_decision(
+                reason=reason, new_args=new_args,
+                decision="allow" if AGENT == CODEX else None)
         print(json.dumps(decision))
     except Exception as e:
         # Fail open on Claude Code; on Copilot CLI a crash would deny the

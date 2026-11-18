@@ -116,11 +116,14 @@ PY
 got=$(rewrite_copilot "git status")
 [ "$got" = "git status --porcelain=v1 -b" ] && ok "git status rewrite (modifiedArgs)" || bad "git status rewrite -> $got"
 
-# permissionDecision must be present and "allow" for a rewrite (Copilot reads this flat field).
-payload='{"toolName": "bash", "toolArgs": {"command": "git status"}}'
-out=$(echo "$payload" | CTX_GUARD_AGENT=copilot-cli python3 "$DIR/hooks/pre_bash_rewrite.py")
-decision=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["permissionDecision"])')
-[ "$decision" = "allow" ] && ok "permissionDecision is 'allow' on rewrite" || bad "permissionDecision -> $decision"
+# A rewrite carries no permission decision: "allow" would skip the agent's own
+# approval rules for the wrapped command. Both agents apply the rewrite anyway.
+for agent in copilot-cli claude-code; do
+  payload='{"toolName": "bash", "toolArgs": {"command": "make && make test"}}'
+  out=$(echo "$payload" | CTX_GUARD_AGENT=$agent python3 "$DIR/hooks/pre_bash_rewrite.py")
+  decision=$(echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("permissionDecision"), d["hookSpecificOutput"].get("permissionDecision"), "updatedInput" in d["hookSpecificOutput"])')
+  [ "$decision" = "None None True" ] && ok "$agent rewrite is not auto-approved" || bad "$agent rewrite decision -> $decision"
+done
 
 # Non-command args (e.g. missing "command" key) must not crash the hook.
 out=$(echo '{"toolName": "bash", "toolArgs": {}}' | python3 "$DIR/hooks/pre_bash_rewrite.py"; echo "exit:$?")

@@ -109,7 +109,8 @@ class RewriteParityTest(HookTestCase):
                 spec = claude.get("hookSpecificOutput", {})
 
                 self.assertEqual(agy["decision"], spec.get("permissionDecision") or "allow")
-                self.assertEqual(agy.get("reason"), spec.get("permissionDecisionReason"))
+                if "permissionDecision" in spec:
+                    self.assertEqual(agy.get("reason"), spec["permissionDecisionReason"])
                 if "updatedInput" in spec:
                     # Wrapped commands name the agent in ctx-guard-run's --filter tag.
                     expected = spec["updatedInput"]["command"].replace(
