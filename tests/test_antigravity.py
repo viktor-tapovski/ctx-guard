@@ -229,8 +229,12 @@ class InstallTest(unittest.TestCase):
     def run_command(self, python_bin):
         command = agent_hooks.antigravity_command(REPO_ROOT, python_bin)
         payload = json.dumps(load_fixture("pre_tool_use_run_command.json"))
-        return subprocess.run(["sh", "-c", command], input=payload, capture_output=True,
-                              text=True, timeout=30).stdout
+        # The real hook runs here, so keep its stats and logs out of the user's.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CTX_GUARD_STATE_DIR": tmp, "CTX_GUARD_LOG_DIR": tmp,
+                   "CTX_GUARD_STATS_FILE": os.path.join(tmp, "stats.jsonl")}
+            return subprocess.run(["sh", "-c", command], input=payload, capture_output=True,
+                                  text=True, env=env, timeout=30).stdout
 
     def test_command_allows_when_python_cannot_run(self):
         self.assertEqual(json.loads(self.run_command("/nonexistent/python3")), {"decision": "allow"})
