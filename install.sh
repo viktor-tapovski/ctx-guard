@@ -284,19 +284,19 @@ os.chmod(temporary, 0o600)
 os.replace(temporary, manifest_path)
 PYEOF
 
-# --- Antigravity CLI: add a named hook to ~/.gemini/config/hooks.json ---
-# Only when agy is installed. The file's prior text goes in the manifest so
-# uninstall can put it back exactly; see hooks/lib/antigravity_config.py.
+# --- Antigravity CLI and Codex CLI: add ctx-guard to their shared hooks files ---
+# Only for agents installed on this machine. Each file's prior text goes in
+# the manifest so uninstall can put it back exactly; see hooks/lib/agent_hooks.py.
 python3 - "$MANIFEST" "$DEST" "$HOME" "$PYTHON_BIN" << 'PYEOF'
 import json, os, sys
 
 manifest_path, dest, home, python_bin = sys.argv[1:5]
 sys.path.insert(0, os.path.join(dest, "hooks", "lib"))
-import antigravity_config
+import agent_hooks
 
 with open(manifest_path, encoding="utf-8") as f:
     manifest = json.load(f)
-antigravity_config.install(manifest, home, dest, python_bin)
+agent_hooks.install(manifest, home, dest, python_bin)
 temporary = manifest_path + ".tmp"
 with open(temporary, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
@@ -333,6 +333,7 @@ echo "Done."
 echo "Claude Code: restart it, then verify with: /hooks and /agents"
 echo "Copilot CLI: restart it, then verify with: /env (look for ctx-guard.json under hooks)"
 [ -d "$HOME/.gemini/antigravity-cli" ] || command -v agy >/dev/null 2>&1 && echo "Antigravity CLI: restart it, then verify with: /hooks"
+[ -d "${CODEX_HOME:-$HOME/.codex}" ] || command -v codex >/dev/null 2>&1 && echo "Codex CLI: restart it, then open /hooks and trust the ctx-guard hook (Codex skips it until you do)"
 echo ""
 echo "Check savings any time with: ctx-guard-stats"
 echo "Uninstall any time with:     ctx-guard-uninstall"

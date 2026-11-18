@@ -8,20 +8,21 @@ support, not theoretical support.
 | Claude Code | `PreToolUse`, `PostToolUse`, `UserPromptSubmit` | Tested |
 | GitHub Copilot CLI | `PreToolUse`, `PostToolUse` | Tested |
 | Antigravity CLI (`agy`) | `PreToolUse` | Fixtures from the docs; not yet run against a live agy |
+| Codex CLI | `PreToolUse` | Fixtures from the docs; not yet run against a live Codex |
 | Other terminal agents | Agent-specific hook adapter required | Not supported yet |
 
 ## Features by agent
 
-| Feature | Claude Code | GitHub Copilot CLI | Antigravity CLI |
-|---|---|---|---|
-| Bash rewrite and compression | Yes | Yes | Yes (`run_command`) |
-| Package-install guard | Yes | Yes | Yes |
-| Redacted output archive and `ctx-guard-recall` | Yes | Yes | Yes |
-| Stats | Yes | Yes | Rewrites and blocks only (no tool output in `PostToolUse`) |
-| Read and Grep bounds (`pre_tool_bound.py`) | Yes | Yes (`view` and `grep`; no prompt-named-file exception) | No |
-| Subagent delegation | Yes | No (prompt-hook context never reaches the model; see below) | No |
-| Context threshold warnings | Yes | Estimated (from tool output; no transcript or context size in the payload) | No (`PostToolUse` can't add context) |
-| Status line segment | Yes | Yes | No (no status line setting documented) |
+| Feature | Claude Code | GitHub Copilot CLI | Antigravity CLI | Codex CLI |
+|---|---|---|---|---|
+| Bash rewrite and compression | Yes | Yes | Yes (`run_command`) | Yes (`Bash`, including `exec_command`) |
+| Package-install guard | Yes | Yes | Yes | Yes (a warning is shown, not asked; see below) |
+| Redacted output archive and `ctx-guard-recall` | Yes | Yes | Yes | Yes |
+| Stats | Yes | Yes | Rewrites and blocks only (no tool output in `PostToolUse`) | Rewrites and blocks only |
+| Read and Grep bounds (`pre_tool_bound.py`) | Yes | Yes (`view` and `grep`; no prompt-named-file exception) | No | No (Codex reads files through `Bash`) |
+| Subagent delegation | Yes | No (prompt-hook context never reaches the model; see below) | No | No |
+| Context threshold warnings | Yes | Estimated (from tool output; no transcript or context size in the payload) | No (`PostToolUse` can't add context) | No (not wired yet) |
+| Status line segment | Yes | Yes | No (no status line setting documented) | No (not wired yet) |
 
 The Read and Grep bounds use PreToolUse `updatedInput`, which replaces the
 whole tool input, and return no permission decision. Checked against
@@ -81,11 +82,37 @@ The payload fixtures in `tests/fixtures/antigravity/` are built from the
 documented sample, not captured from a live session. Replace them with a
 capture once one is available.
 
+Codex CLI is wired from https://developers.openai.com/codex/hooks, checked
+2026-11-17. ctx-guard adds one `PreToolUse` group with the matcher `^Bash$`
+to `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), only when that
+directory exists or `codex` is on the PATH. Uninstall restores the file the
+same way as for agy. Codex runs a user-level hook only after you review and
+trust it, so after install open `/hooks` in Codex and trust the ctx-guard
+hook; Codex asks again whenever the hook's definition changes, for example
+after reinstalling to a different directory.
+
+Codex takes Claude's `hookSpecificOutput` with three differences:
+
+- It has no `ask`. A hook that returns one is marked failed and the command
+  runs anyway. So a package warning goes out as a `systemMessage` for you
+  and `additionalContext` for the model, with no permission decision, and
+  Codex's own approval policy decides. The rewrite is dropped in that case,
+  because Codex takes `updatedInput` only with `allow`.
+- It reports output fields it doesn't know as a hook error, so ctx-guard
+  sends only the documented ones.
+- A hook that exits 0 with no output counts as success, so on any internal
+  error the hook prints nothing and the original command runs.
+
+The `PostToolUse` output shape for `Bash` isn't documented, so the threshold
+warnings aren't wired for Codex yet. The payload fixture in
+`tests/fixtures/codex/` is assembled from the documented field tables, not
+captured from a live session.
+
 ## Runtime requirements
 
 - Bash with standard Unix command-line tools.
 - Python 3.10 or newer.
-- A Claude Code, GitHub Copilot CLI or Antigravity CLI version that supports the hook events
+- A Claude Code, GitHub Copilot CLI, Antigravity CLI or Codex CLI version that supports the hook events
   used by the installation script.
 - macOS or Linux. Windows is not currently tested.
 

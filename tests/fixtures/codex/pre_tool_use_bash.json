@@ -1,0 +1,13 @@
+{
+  "_source": "PreToolUse payload assembled from the field tables at https://developers.openai.com/codex/hooks (checked 2026-11-17; the page shows no full sample). Not captured from a live Codex session; replace with a capture when one is available.",
+  "session_id": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+  "transcript_path": "/home/user/.codex/sessions/2026/11/17/rollout-0199a1b2.jsonl",
+  "cwd": "/workspace/project",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.5-codex",
+  "permission_mode": "default",
+  "turn_id": "turn-7",
+  "tool_name": "Bash",
+  "tool_use_id": "call_9f8e7d6c5b4a",
+  "tool_input": {"command": "npm test"}
+}
