@@ -100,6 +100,15 @@ def stats_write_path() -> str:
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def env_int(name: str, default: int) -> int:
+    """A positive integer from the environment, or default if unset or invalid."""
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def get_field(payload: dict, *names: str, default: Any = None) -> Any:
     """Return the first present field among `names` (handles casing differences)."""
     for name in names:

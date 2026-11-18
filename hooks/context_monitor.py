@@ -29,12 +29,23 @@ import json
 import os
 import sys
 
+
+def _exit_quietly(exc_type, exc, tb) -> None:
+    """Backstop for a crash before main()'s own handler, such as a failed
+    import: Copilot CLI denies the tool call when a hook exits non-zero."""
+    print(f"[ctx-guard] hook failed: {exc}", file=sys.stderr, flush=True)
+    os._exit(0)
+
+
+sys.excepthook = _exit_quietly
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
     AGENT,
     PENDING_DIR,
     build_posttooluse_context,
     drain_spools,
+    env_int,
     estimate_ratio,
     normalize_tool_call,
     normalize_tool_result_text,
@@ -52,8 +63,8 @@ SCRIPT_DIR = os.environ.get(
 )
 SCRIPT_MAX_AGE_S = 6 * 3600
 
-WINDOW_TOKENS = int(os.environ.get("CTX_GUARD_WINDOW", "200000"))
-COPILOT_WINDOW_TOKENS = int(os.environ.get("CTX_GUARD_COPILOT_WINDOW_TOKENS", "128000"))
+WINDOW_TOKENS = env_int("CTX_GUARD_WINDOW", 200000)
+COPILOT_WINDOW_TOKENS = env_int("CTX_GUARD_COPILOT_WINDOW_TOKENS", 128000)
 THRESHOLDS = [50, 70, 85]
 STATE_DIR = os.environ.get(
     "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"

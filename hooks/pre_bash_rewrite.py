@@ -25,6 +25,16 @@ import shlex
 import subprocess
 import sys
 
+
+def _exit_quietly(exc_type, exc, tb) -> None:
+    """Backstop for a crash before main()'s own handler, such as a failed
+    import: Copilot CLI denies the tool call when a hook exits non-zero."""
+    print(f"[ctx-guard] hook failed: {exc}", file=sys.stderr, flush=True)
+    os._exit(0)
+
+
+sys.excepthook = _exit_quietly
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
     AGENT,
