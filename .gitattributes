@@ -1,0 +1,10 @@
+# Left out of the release tarball (git archive): only what runs, plus docs.
+.github/ export-ignore
+tests/ export-ignore
+packaging/ export-ignore
+.gitattributes export-ignore
+.gitignore export-ignore
+commitlint.config.cjs export-ignore
+release-please-config.json export-ignore
+.release-please-manifest.json export-ignore
+docs/launch.md export-ignore

@@ -11,6 +11,7 @@ import copy
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,12 +22,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "hooks"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "hooks", "lib"))
 
-import antigravity_config  # noqa: E402
+import agent_hooks  # noqa: E402
 import ctx_guard_common  # noqa: E402
 import pkg_install_check  # noqa: E402
 import pre_bash_rewrite  # noqa: E402
 
 FIXTURES = os.path.join(REPO_ROOT, "tests", "fixtures", "antigravity")
+AGY = next(t for t in agent_hooks.TARGETS if t.agent == "antigravity-cli")
 REGISTRY = {"npm": {"react": 4000, "lodash": 4000}, "pip": {"requests": 4000, "reqeusts": 400}}
 
 # Rewrites, wraps, a block, package-guard outcomes, and pass-throughs.
@@ -107,7 +109,8 @@ class RewriteParityTest(HookTestCase):
                 spec = claude.get("hookSpecificOutput", {})
 
                 self.assertEqual(agy["decision"], spec.get("permissionDecision") or "allow")
-                self.assertEqual(agy.get("reason"), spec.get("permissionDecisionReason"))
+                if "permissionDecision" in spec:
+                    self.assertEqual(agy.get("reason"), spec["permissionDecisionReason"])
                 if "updatedInput" in spec:
                     # Wrapped commands name the agent in ctx-guard-run's --filter tag.
                     expected = spec["updatedInput"]["command"].replace(
@@ -196,11 +199,11 @@ class InstallTest(unittest.TestCase):
 
     def install(self):
         with redirect_stdout(io.StringIO()):
-            antigravity_config.install(self.manifest, self.home, "/opt/ctx guard", "/usr/bin/python3")
+            agent_hooks.install_target(AGY, self.manifest, self.home, "/opt/ctx guard", "/usr/bin/python3")
 
     def restore(self):
         with redirect_stdout(io.StringIO()):
-            antigravity_config.restore(self.manifest)
+            agent_hooks.restore_target(AGY, self.manifest)
 
     def read(self):
         with open(self.path, "rb") as f:
@@ -217,8 +220,33 @@ class InstallTest(unittest.TestCase):
         group = config["ctx-guard"]["PreToolUse"][0]
         self.assertEqual(group["matcher"], "run_command")
         self.assertEqual(group["hooks"][0]["command"],
-                         "CTX_GUARD_AGENT=antigravity-cli /usr/bin/python3 '/opt/ctx guard/hooks/pre_bash_rewrite.py'")
+                         agent_hooks.antigravity_command("/opt/ctx guard", "/usr/bin/python3"))
+        self.assertIn("CTX_GUARD_AGENT=antigravity-cli /usr/bin/python3 '/opt/ctx guard/hooks/pre_bash_rewrite.py'",
+                      group["hooks"][0]["command"])
         self.assertEqual(group["hooks"][0]["timeout"], 15)
+        self.assertLess(ctx_guard_common.ANTIGRAVITY_DEADLINE_S, 15)
+
+    def run_command(self, python_bin):
+        command = agent_hooks.antigravity_command(REPO_ROOT, python_bin)
+        payload = json.dumps(load_fixture("pre_tool_use_run_command.json"))
+        # The real hook runs here, so keep its stats and logs out of the user's.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CTX_GUARD_STATE_DIR": tmp, "CTX_GUARD_LOG_DIR": tmp,
+                   "CTX_GUARD_STATS_FILE": os.path.join(tmp, "stats.jsonl")}
+            return subprocess.run(["sh", "-c", command], input=payload, capture_output=True,
+                                  text=True, env=env, timeout=30).stdout
+
+    def test_command_allows_when_python_cannot_run(self):
+        self.assertEqual(json.loads(self.run_command("/nonexistent/python3")), {"decision": "allow"})
+        self.assertIn("decision", json.loads(self.run_command(sys.executable)))
+
+    def test_slow_hook_allows_before_the_agy_timeout(self):
+        code = ("import sys, time; sys.path.insert(0, sys.argv[1]); import ctx_guard_common as c; "
+                "c.ANTIGRAVITY_DEADLINE_S = 1; c.run_pretooluse_hook(lambda: time.sleep(20))")
+        env = {**os.environ, "CTX_GUARD_AGENT": "antigravity-cli"}
+        out = subprocess.run([sys.executable, "-c", code, os.path.join(REPO_ROOT, "hooks", "lib")],
+                             env=env, capture_output=True, text=True, timeout=10).stdout
+        self.assertEqual(json.loads(out), {"decision": "allow"})
 
     def test_existing_file_restored_byte_identical(self):
         original = b'{ "other-hook": {"Stop": [{"command": "./x.sh"}]} }'  # odd spacing, no newline
@@ -249,13 +277,13 @@ class InstallTest(unittest.TestCase):
         self.write_existing(b"{not json")
         self.install()
         self.assertEqual(self.read(), b"{not json")
-        self.assertNotIn("antigravity", self.manifest)
+        self.assertNotIn("antigravity-cli", self.manifest.get("hook_files", {}))
 
     def test_skipped_when_agy_not_installed(self):
         os.rmdir(os.path.join(self.home, ".gemini", "antigravity-cli"))
         self.install()
         self.assertFalse(os.path.exists(self.path))
-        self.assertNotIn("antigravity", self.manifest)
+        self.assertNotIn("antigravity-cli", self.manifest.get("hook_files", {}))
 
 
 if __name__ == "__main__":

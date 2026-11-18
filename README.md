@@ -1,300 +1,225 @@
 # ctx-guard
 
-A self-hosted context-window and token optimizer for **Claude Code** and **GitHub Copilot CLI**. No third-party dependencies — pure bash + Python stdlib.
+**Keep your AI coding agent's context window clean.**
 
-The same hook scripts run unmodified under both tools; only the per-tool wiring differs (`~/.claude/settings.json` vs `~/.copilot/hooks/ctx-guard.json`). See [How cross-tool compatibility works](#how-cross-tool-compatibility-works) below.
+Coding agents burn through their context on noise: a 3,000-line test log, a
+full `git diff`, a `grep` that matched half the repo. Once the window fills
+up, the agent forgets what it was doing, and you pay for tokens it never
+needed.
 
-> **Status:** ctx-guard is in an early public soft launch. Claude Code and
-> GitHub Copilot CLI are the tested integrations; other terminal agents need
-> an adapter and are not supported yet.
+ctx-guard sits between your agent and the shell. It trims bulky output before
+the model sees it, keeps the full output on your machine in case the agent
+needs it later, and shows you exactly how much it saved. It also stops your
+agent from installing packages that don't exist.
 
-## Why ctx-guard
+It works with **Claude Code**, **GitHub Copilot CLI**, **Antigravity CLI** and
+**Codex CLI**. It's plain bash and Python, with no dependencies, no account
+and no network calls except optional package-registry checks.
 
-ctx-guard is designed to make agent tool output smaller without hiding useful
-diagnostics. It keeps a redacted output archive locally, returns a bounded
-summary to the model, and reports measured byte reductions separately from
-rewrite and output-volume observations.
-
-This project does not promise a universal savings percentage. Results depend
-on the commands, repositories, agent, and output being processed. See the
-[benchmark methodology](docs/benchmark.md) for reproducible measurements.
-
-## Quick links
-
-- [Compatibility](docs/compatibility.md)
-- [Benchmark methodology](docs/benchmark.md)
-- [Public launch plan](docs/launch.md)
-- [Security and privacy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-- [Changelog](CHANGELOG.md)
-
-## What it does
-
-**1. Compresses bash/git/grep output before it reaches the model** (`hooks/pre_bash_rewrite.py`, `PreToolUse`)
-
-Known token-burners get rewritten to efficient equivalents:
-
-| Agent runs | ctx-guard executes |
-|---|---|
-| `git status` | `git status --porcelain=v1 -b` |
-| `git log` | `git log --oneline -n 20` |
-| `git diff` | `git diff --stat` + hint |
-| `grep -r foo .` | `grep -r foo . \| head -50` |
-| `find . -type f` | `find . -type f \| head -100` |
-| `cat big_file` | `head -c 8000` + range hint |
-| `docker logs foo` | `docker logs foo \| tail -100` (skipped if `-f`/`--follow`) |
-| `kubectl get ...` / `kubectl describe ...` | piped through `head -50` / `head -80` |
-| `terraform plan` | `terraform plan -no-color \| tail -100` |
-| `npm ls`, `pip list` | piped through `head -50` |
-| `npm test`, `pytest`, `cargo test`, compound commands | wrapped in `ctx-guard-run` |
-
-`bin/ctx-guard-run` executes the real command, archives a **redacted** output
-log to `/tmp/ctx-guard-<uid>/logs/`, and returns to the model only:
-error/warning lines (numbered) + head + tail + the log path. Common bearer
-tokens, API keys, passwords, private-key blocks, and known token formats are
-redacted before the archive is written (see [what redaction catches](SECURITY.md#what-redaction-catches)). Exit codes are preserved. Commands
-already piped through `head/tail/grep/wc` are left untouched. Archived logs
-older than `CTX_GUARD_LOG_RETENTION_DAYS` are pruned automatically on every
-run. Every invocation also logs a real, measured before/after byte count —
-see [Statistics](#statistics).
-
-Compressed output ends with `Full log: ctx-guard-recall show <run-id> --grep
-<pattern>`. `ctx-guard-recall` (symlinked onto `PATH` by `install.sh`) reads
-only those redacted archives under `CTX_GUARD_LOG_DIR` and refuses run ids
-outside it; every answer is bounded and ends with a truncation notice:
-
-```bash
-ctx-guard-recall list [-n 20]                    # recent runs: time, id, exit code, size, redacted command
-ctx-guard-recall show last --grep FAIL           # matching lines, capped at 200
-ctx-guard-recall show run-Ab3x9QzK --lines 400:460 --grep error --context 2
-ctx-guard-recall search 'ECONNREFUSED' --since 1d # at most 50 matches as run-id:line: text
-```
-
-The three subagents are told to use it instead of re-running a command.
-
-**2. Auto-delegates exploration to subagents** (`hooks/auto_delegate.py`, `UserPromptSubmit` + three agents) — **Claude Code only**, see caveat below
-
-Prompts like "investigate…", "why are tests failing", "where is X defined" get a delegation directive injected, routing to:
-- `researcher` (sonnet) — codebase/library investigation, returns ≤300-word report with `path:line` references
-- `log-triager` (haiku) — runs failing tests/builds in its own context, returns root cause + fix plan
-- `code-searcher` (haiku) — unbounded grep in isolation, returns only locations
-
-All three carry `Use PROACTIVELY` descriptions, so Claude Code also auto-delegates on its own. Cheap models handle the disposable reading; your main-thread model stays clean.
-
-**3. Auto-manages the context window** (`hooks/context_monitor.py`, `PostToolUse`)
-
-Estimates usage from the transcript file (bytes/4) and injects escalating guidance once per session at 50% (prefer subagents), 70% (stop new file reads, suggest focused `/compact`), and 85% (summarize state, compact or restart now).
-
-Copilot CLI doesn't give hooks a transcript or the context size, so there the estimate is the session's total tool output (bytes/4) against `CTX_GUARD_COPILOT_WINDOW_TOKENS` (default 128000), and each warning is labelled "estimated from tool output". Tool output is only part of the context, so the estimate runs low; the small default window makes up for some of that. The advice names Copilot's built-in `explore` and `task` agents. Copilot's own `/context` and status line show the real figure.
-
-**4. Measures real token savings** (`bin/ctx-guard-stats`)
-
-See [Statistics](#statistics).
-
-**5. Flags risky package installs** (`hooks/pkg_install_check.py`, called from `pre_bash_rewrite.py`)
-
-Detects install/run commands across `npm`/`pnpm`/`yarn`/`bun`, `pip`/`pip3`/
-`python -m pip`/`uv pip`/`uv add`/`poetry add`/`pipx install`, `cargo install`/
-`cargo add`, `gem`, `apt`/`apt-get`, `brew`, `apk`, and `npx`/`bunx`/`pipx run`/
-`uvx`. Structural checks (no network) flag `curl|bash`-style remote-script
-piping (including `| python3 -`, `bash <(curl …)` and `sh -c "$(curl …)"`), unpinned
-versions, confirmation-bypass flags (`--force`, `-y`, `--allow-unauthenticated`),
-and git/URL-based installs. For `npm`, `pip`, `cargo`, and `gem` specifically
-(the ecosystems with an open, anyone-can-publish registry), a registry lookup
-also checks package existence, publish age, and typosquat distance against a
-bundled list of popular package names.
-
-A package that does not exist on its registry is **blocked** outright — this
-is the common shape of an LLM hallucinating a plausible-looking package name.
-Everything else (new packages, near-miss names, unpinned versions, bypass
-flags, git/URL sources) is a **warning** that still lets the command run.
-
-Registry lookups use a 1.5s timeout and fail open: if the registry is
-unreachable, the registry-based checks are skipped for that install and only
-the no-network structural checks apply. Private/internal packages that won't
-resolve against the public registry can be exempted via an allowlist file at
-`~/.ctx-guard/pkg-allowlist` (global) and/or `.ctx-guard/pkg-allowlist`
-(per-repo, glob patterns supported, e.g. `@yourorg/*`).
-
-The agent sees one line naming the decision, the install and the reason, e.g.:
-
-```
-ctx-guard blocked pip install reqeusts: no such package on registry (did you mean requests?). Allowlist: add the name to .ctx-guard/pkg-allowlist (see README#tuning)
-```
-
-Measured catch rate on a 105-command fixture set (stubbed registry, no
-network): 100% of nonexistent names, 92% of typosquats (four-character names
-are not distance-checked), 0 of 47 legitimate installs flagged. See
-[docs/benchmark.md](docs/benchmark.md#package-install-guard) for the method
-and limitations.
-
-Set `CTX_GUARD_PKG_CHECK=0` to disable this feature entirely.
-
-**6. Bounds large Read and Grep calls** (`hooks/pre_tool_bound.py`, `PreToolUse`)
-
-Built-in tool output can't be shrunk after the tool runs, so this hook bounds
-the call before it does:
-
-- **Read** with no `limit` on a file with more than `CTX_GUARD_READ_MAX_LINES`
-  lines left to read gets `limit` set to that value, plus a note telling the
-  model the file's length and the `offset` to continue from. Files named in
-  your latest prompt, images, PDFs, notebooks and binary files are left alone.
-- **Grep** with `output_mode: "content"` and no `head_limit` gets
-  `head_limit: CTX_GUARD_GREP_MAX`.
-- **Glob** has no limit field and is not touched.
-
-Under Copilot CLI the same hook bounds the `view` and `grep` tools: a `view`
-with no `view_range` gets `view_range: [1, CTX_GUARD_READ_MAX_LINES]`, and the
-note gives the next `view_range` to read. Copilot doesn't send the hook a
-transcript, so files named in your prompt are bounded too; ask for a specific
-range, or set a higher `CTX_GUARD_READ_MAX_LINES`, when you need more.
-
-The hook only changes the input. It never approves the call, so your normal
-permission rules still apply. Bounded calls are counted under OBSERVED in
-`ctx-guard-stats`, and their savings are reported under ESTIMATED. Set
-`CTX_GUARD_BOUND_TOOLS=0` to turn it off.
+> **Status:** early public release. Claude Code and Copilot CLI are tested
+> end to end; Antigravity CLI and Codex CLI support is newer. See
+> [compatibility](docs/compatibility.md) for what works where.
 
 ## Install
 
 ```bash
-bash install.sh
+# Homebrew (macOS, Linux)
+brew install ctx-guard/tap/ctx-guard
+ctx-guard install
+
+# or curl (checks the release's SHA-256 before running anything)
+curl -fsSL https://raw.githubusercontent.com/ctx-guard/install/main/get.sh | bash
 ```
 
-This installs shared files to `~/.ctx-guard/` (used by both tools) and then:
-- **Claude Code**: merges hooks into `~/.claude/settings.json` (backup saved as `.bak`), installs the three subagents to `~/.claude/agents/`, and appends guard rules to `~/.claude/CLAUDE.md`.
-- **Copilot CLI**: writes `~/.copilot/hooks/ctx-guard.json` wiring the rewrite, Read/Grep bound and stats hooks.
+The installer lists the agents it supports, with the ones on your machine
+already ticked. Arrow keys move, space selects, enter continues. Then restart
+your agent, and that's it: there's nothing to learn or change in how you work.
 
-Idempotent — safe to re-run. Restart each tool: verify Claude Code with `/hooks` and `/agents`; verify Copilot CLI with `/env` (look for `ctx-guard.json` under hooks).
+Want to read the installer first? Download
+[`get.sh`](https://github.com/ctx-guard/install/blob/main/get.sh), look it
+over, and run `bash get.sh`. More install options are [below](#more-install-options).
 
-## Statistics
+## Try it
 
-Check whether ctx-guard is actually saving tokens — don't take it on faith:
-
-`install.sh` symlinks it onto your `PATH` via `~/.local/bin`, so just run:
+See ctx-guard catch a misspelled package and trim a 3,000-line test log, in
+a few seconds and without waiting for your agent to make a mistake:
 
 ```bash
-ctx-guard-stats            # one-line savings gauge
-ctx-guard-stats --verbose  # full MEASURED/OBSERVED report
-ctx-guard-stats --json     # machine-readable
-ctx-guard-stats --gains    # measured savings per command (add -n N for top N rows)
-ctx-guard-stats --since 7d # last 7 days only
-ctx-guard-stats --breakdown [daily|weekly|monthly]  # per-period table (bare = all)
-ctx-guard-stats --reset    # clear the log
-ctx-guard-stats --version  # which ctx-guard is installed
+ctx-guard try     # after curl: ctx-guard-try    from a clone: bin/ctx-guard-try
 ```
 
-(If `~/.local/bin` isn't on your `PATH`, use the full path `~/.ctx-guard/bin/ctx-guard-stats` instead, or add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc file.)
+```
+1. Your agent tries to install a misspelled package
+   $ pip install reqeusts
+   ctx-guard blocked pip install reqeusts: no such package on registry (did you mean requests?).
+   Nothing was installed. …
 
-The default is a single line — the headline savings and nothing else:
+2. Your agent runs a test suite with 3,000 lines of output
+   The agent gets 81 lines instead. …
+
+3. Your agent pulls just the lines it needs from the full log
+   $ ctx-guard-recall show run-FXKIIwa6 --grep token
+   2999: using token [REDACTED TOKEN]
+```
+
+It runs the real hooks on made-up input, installs nothing, and leaves your
+stats alone. With Homebrew it works even before `ctx-guard install`.
+
+## What you'll notice
+
+**Long output gets short.** When your agent runs your test suite, it gets the
+errors, the first and last lines, and a pointer to the full log, not 3,000
+lines of passing tests:
+
+```
+=== ctx-guard: output compressed (    3001 lines -> summary, exit=1) ===
+--- errors/warnings (line-numbered) ---
+3001:FAIL src/auth.test.ts:42 expected 200, received 401
+--- first 37 lines ---
+…
+--- ... 2927 lines omitted ... ---
+--- last 37 lines ---
+…
+=== Full log: ctx-guard-recall show run-WgONEU37 --grep <pattern> (do not re-run the command) ===
+```
+
+Nothing is thrown away. The agent can pull the exact lines it needs with
+`ctx-guard-recall` instead of running the command again.
+
+**Common commands get leaner versions.** `git status` becomes
+`git status --porcelain`, `git log` shows the last 20 commits, a recursive
+`grep` is capped at 50 lines, and in Claude Code and Copilot CLI huge files
+are read in pages.
+
+**Made-up packages get blocked.** Agents sometimes invent package names that
+look real. ctx-guard checks npm, PyPI, crates.io and RubyGems first:
+
+```
+ctx-guard blocked pip install reqeusts: no such package on registry (did you mean requests?)
+```
+
+Lookalike names, brand-new packages, `curl | bash` and unpinned versions get a
+warning but still run.
+
+**Your agent gets a heads-up before the window fills.** In Claude Code and
+Copilot CLI, at 50%, 70% and 85% context, ctx-guard nudges the agent to hand work to subagents, stop reading
+new files, or compact.
+
+**Secrets stay out of the logs.** API keys, tokens, passwords and private keys
+are masked before output is saved or shown to the model. It's pattern
+matching, so treat it as a safety net, not a guarantee.
+
+## See what it saved
+
+```bash
+ctx-guard-stats
+```
 
 ```
 ctx-guard  |███████████████████▉    | 83.0%  ·  319.5KB saved  ·  ~81.8K tokens
 ```
 
-Bars are decoration only: piped or redirected output drops the bar and stays
-plain ASCII, and `CTX_GUARD_BARS=always|never` overrides the TTY auto-detection
-either way. On a terminal that cannot encode the block glyphs (`LC_ALL=C` and
-similar) the bars fall back to `#`/`-` rather than failing.
+ctx-guard never makes up a savings number. **Measured** savings come from
+commands where it knows both the full output and what it returned. Savings it
+can only **estimate** are always labelled as estimates and kept separate.
+Your mileage depends on your commands and repos; the
+[benchmark methodology](docs/benchmark.md) shows how to measure your own.
 
-Once the package guard has checked an install, the gauge also carries
-`pkg-guard: 8 checked, 2 blocked, 4 warned`, and `--verbose` adds a
-**PACKAGE GUARD** section:
+Try `--gains` for savings per command, `--breakdown weekly` for trends, or
+`--verbose` for the full report. More in [docs/statistics.md](docs/statistics.md).
 
-```
-== PACKAGE GUARD (install commands checked before they ran) ==
-  installs checked: 8  (allowed 2, warned 4, blocked 2)
-  top reasons (warned/blocked installs):
-    unpinned             4
-    nonexistent          2
-    typosquat            1
-    pipe_to_shell        1
-```
-
-`--json` carries the same numbers as a `pkg_guard` object (`checked`,
-`allowed`, `warned`, `blocked`, `top_reasons`, `by_ecosystem`) next to the
-existing `pkg_blocked_count` and `pkg_warned_count`. Each check is one
-`pkg_guard` event holding the ecosystem, decision, reason codes
-(`nonexistent`, `typosquat`, `new_package`, `url_install`, `pipe_to_shell`,
-`bypass_flag`, `unpinned`) and the package name, with credentials stripped
-from URL specs. The command line itself is never logged. `pkg_blocked` and
-`pkg_warned` events written by v0.6.0 and earlier still count.
-
-`--verbose` prints the full report, where the compression ratio and the
-per-rule / per-tool breakdowns each get their own bar. It is split into two
-honestly-labeled sections:
-
-- **MEASURED** — real before/after byte counts from `ctx-guard-run`. The full command output and what was actually returned are both known from the same execution, so this is a hard number (bytes and an estimated token count using the same bytes/4 heuristic ctx-guard uses elsewhere), not a guess.
-- **OBSERVED** — counts of command rewrites applied (e.g. `git status` → `--porcelain`), counts of bounded Read/Grep calls, and total tool-output bytes delivered per tool. These are **not** converted into a "tokens saved" figure, because the unbounded/original version of those commands is never actually run — there's no ground truth to diff against. Fabricating a number there would defeat the point of asking for proof. The exception is read-only git rewrites (`git status`, `git log`, `git diff`, `git show`, `git branch -a`): the hook runs both forms (2s timeout) and records the real before/after bytes as MEASURED. Because the hook runs outside any agent sandbox while `.git/config` is writable from inside it, measurement only happens when every repo-local git config key is on an inert allowlist (no filters, includes, gpg, aliases, ...); otherwise the rewrite falls back to an ESTIMATE.
-- **ESTIMATED** — rewrites that couldn't be measured (`grep`/`find`/`cat`/`docker`/`kubectl`/...), and bounded Read/Grep calls (`read-bound`, `grep-bound`). A bounded Read's ratio comes from the file's line count against the lines the read would otherwise return (2,000 for Claude Code's Read, the whole file for Copilot's `view`). The returned bytes are known; the unbounded size is assumed from a per-rule reduction ratio (`ESTIMATE_RATIOS` in `hooks/lib/ctx_guard_common.py`, overridable with a JSON object in `$CTX_GUARD_ESTIMATE_RATIOS`). Always shown separately and labeled, never added to MEASURED. The estimate pairs PreToolUse with PostToolUse via `tool_use_id`; Copilot CLI sends none, so there it pairs them by session and the command, file path or pattern.
-
-`--gains` replaces the default report with a measured-only view: a header
-(commands, input/output tokens, tokens saved, exec time, efficiency meter) and a
-**By Command** table sorted by tokens saved, with per-command count, saved
-tokens, average reduction (green >= 90%, yellow 50-90%, red < 50% on a
-terminal), total time and an impact bar. It composes with `--since` and
-`--json`, takes `-n/--top N` (default 10) for the table length, and cannot be
-combined with `--verbose` or `--breakdown`. Measured git rewrites appear as rows
-(e.g. `git`); unmeasured rewrites and blocks are a footer count, followed by the
-ESTIMATED rewrite total on its own line. With no measured commands in range it
-prints `No measured commands yet` and exits 0. `--gains --json` emits
-`{"gains": {"total_commands", "input_tokens", "output_tokens", "tokens_saved",
-"saved_pct", "exec_ms_total", "exec_ms_avg", "by_command": [...], "rewrites",
-"blocked", "estimated"}}`, where each `by_command` entry has `command`, `count`,
-`saved_tokens`, `avg_saved_pct` and `avg_ms`.
-
-Each `ctx_guard_run` event records `command` (the program name only, e.g.
-`git`; leading `VAR=value`, `sudo`/`env`/`time`/`command`/`nice` and `cd <dir> &&`
-are skipped, and `(unknown)` is logged if it cannot be parsed) and
-`duration_ms`. Arguments and paths are never logged. Events written by older
-versions have neither field and group under `(unknown)` with zero time.
-
-### Status line (optional)
+### In your status line
 
 ```bash
-bash install.sh --statusline
+ctx-guard install --statusline
 ```
 
-Adds a live savings segment to the Claude Code and Copilot CLI status lines,
-for the agent you are in:
+(With curl, rerun the installer with `| bash -s -- --statusline`; from a
+clone, `bash install.sh --statusline`. The same goes for the
+`--statusline-preset` below.)
+
+adds a live counter to the Claude Code and Copilot CLI status lines:
 
 ```
 ctx-guard ⬇ today 12.4k (~3.1k) · total 1.2M (~240k)
 ```
 
-Tokens (bytes/4). Plain numbers are MEASURED, `(~…)` ESTIMATED; "today" is
-since local midnight. It sets `statusLine` in `~/.claude/settings.json` and
-`~/.copilot/settings.json` to `ctx-guard-statusline <agent>`; a status line you
-already had is recorded in the install manifest, run first with the same
-stdin, and the segment is appended after ` │ `. `ctx-guard-uninstall` restores
-the original (or removes ours) unless you changed it since. To stay fast on
-every refresh it keeps an incremental rollup, `stats.rollup.json`, next to
-`stats.jsonl` (mode `600`, rebuilt if the log is replaced or truncated), and it
-does not drain sandbox spools, so it can trail `ctx-guard-stats` by one tool
-call. With no stats or no savings yet the segment is empty.
+Prefer something else? Pick a preset (`minimal`, `security`, `full`,
+`powerline`) or write your own template, and preview it with your real
+numbers first:
 
-In Copilot CLI the segment shows in the footer's `custom` item; if you don't
-see it, turn that item on in Copilot's footer settings. The agents and their
-config files are listed in one place, `TARGETS` in
-`hooks/lib/statusline_config.py`, which install and uninstall both read.
+```bash
+ctx-guard-statusline --preview
+ctx-guard install --statusline-preset security    # ⬇ 3.0k · 🛡 5
+```
 
-All stats are per-agent (`claude-code` / `copilot-cli`), recorded to `${XDG_STATE_HOME:-$HOME/.local/state}/ctx-guard/stats.jsonl` (persistent across reboots; dir mode `700`), one JSON object per line, mode `600`. If that dir is not writable, writers fall back to `/tmp/ctx-guard-<uid>/state/stats.jsonl`. `ctx-guard-uninstall` leaves this file in place.
+Already have a status line, such as one from statusline.sh? ctx-guard keeps
+it and adds its segment after it, or you can drop
+`ctx-guard-statusline claude-code --segment` into your own script. See
+[docs/statusline.md](docs/statusline.md).
 
-## How cross-tool compatibility works
+## How it works
 
-Claude Code and Copilot CLI have different native hook payload shapes and output contracts:
+ctx-guard uses the hook systems that each agent already has. Before a shell
+command runs, a hook may swap it for a leaner version or route it through
+`ctx-guard-run`, which runs the real command once, saves a redacted copy of the
+full output, and hands back a short summary. Exit codes are kept, and commands
+you've already piped through `head`, `tail` or `grep` are left alone.
 
-| | Claude Code | Copilot CLI (native) |
-|---|---|---|
-| Input fields | `tool_name`, `tool_input` | `toolName`, `toolArgs` |
-| Rewrite output | `hookSpecificOutput.updatedInput` | flat `modifiedArgs` |
+A few principles:
 
-Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead of `preToolUse`) that makes it deliver Claude-shaped payloads (`tool_name`/`tool_input`) and apply Claude's matcher semantics — that's what `install.sh` configures. `hooks/lib/ctx_guard_common.py` additionally normalizes both field-name variants and emits a decision object containing **both** the nested Claude shape and the flat Copilot shape, so the identical script works regardless of which runtime is calling it, with no per-tool branching in the rewrite logic itself.
+- **It never breaks your agent.** If a hook hits any error, it steps aside and
+  the command runs normally.
+- **It never changes what you typed.** Only the commands the agent runs are
+  rewritten, and your normal permission prompts still apply.
+- **It stays on your machine.** Logs live in a private, per-user folder and are
+  deleted after 7 days.
+- **It cleans up after itself.** Uninstall removes only what ctx-guard added,
+  and leaves alone anything you've changed since.
 
-**Important asymmetry:** Copilot CLI's command `preToolUse` hooks are **fail-closed** — a script crash or non-zero exit denies the tool call outright, even if stdout reports `permissionDecision: "allow"` (Claude Code fails open instead). Every hook in this repo therefore wraps its entire body in a top-level `try/except` and always exits `0`, regardless of runtime.
+The full details, per feature and per agent, are in
+[docs/how-it-works.md](docs/how-it-works.md).
 
-`auto_delegate.py` is intentionally **not** wired into Copilot CLI: Copilot reads `additionalContext` from a `userPromptSubmitted` hook but never adds it to the conversation (checked in the Copilot CLI 1.0.62 source), so the injected delegation directive would never reach the model. The hook could rewrite the prompt itself (`modifiedPrompt`), but ctx-guard doesn't change what you typed. Copilot CLI already auto-delegates to its own built-in subagents (`explore`, `task`, `research`, etc.), so this isn't a real capability gap — just a different mechanism.
+## More install options
+
+```bash
+# From a clone
+git clone https://github.com/viktor-tapovski/ctx-guard.git && cd ctx-guard && bash install.sh
+
+# Skip the checklist by naming agents
+ctx-guard install --agents claude-code,codex-cli
+curl -fsSL .../get.sh | bash -s -- --agents all    # claude-code, copilot-cli, antigravity-cli, codex-cli
+```
+
+With no terminal and no `--agents` (CI, scripts), or with `--yes`, it sets up
+every agent it finds. Running it again is safe, and leaving an agent out
+removes ctx-guard from it.
+
+What it changes:
+
+- **Everything shared** goes in `~/.ctx-guard/`.
+- **Claude Code**: hooks in `~/.claude/settings.json` (a `.bak` backup is
+  kept), three helper subagents in `~/.claude/agents/`, and a few rules in
+  `~/.claude/CLAUDE.md`.
+- **Copilot CLI**: `~/.copilot/hooks/ctx-guard.json`.
+- **Antigravity CLI** and **Codex CLI**: one hook in
+  `~/.gemini/config/hooks.json` and `~/.codex/hooks.json`.
+
+To check it's working after a restart, run `/hooks` in Claude Code,
+Antigravity CLI or Codex CLI, or `/env` in Copilot CLI. Codex CLI runs the
+hook only after you trust it in `/hooks`.
+
+You need bash and Python 3.9 or newer. After `brew upgrade ctx-guard`, run
+`ctx-guard install` again, because the hooks are copied into `~/.ctx-guard`.
+
+**Uninstall:** `ctx-guard-uninstall` removes everything, or
+`ctx-guard-uninstall --agents codex-cli` removes it from one agent only. Your
+stats file is kept.
 
 ## Tuning
+
+Everything works out of the box. If you want to adjust it, set these
+environment variables:
 
 | Env var | Default | Meaning |
 |---|---|---|
@@ -302,19 +227,20 @@ Copilot CLI also supports a **PascalCase event-name mode** (`PreToolUse` instead
 | `CTX_GUARD_READ_MAX_LINES` | 400 | Read calls without a `limit` (Copilot: `view` without a `view_range`) are capped at this many lines |
 | `CTX_GUARD_GREP_MAX` | 100 | `head_limit` added to Grep content searches that set none |
 | `CTX_GUARD_BOUND_TOOLS` | 1 | Set to `0` to stop bounding Read and Grep calls |
+| `CTX_GUARD_PKG_CHECK` | 1 | Set to `0` to turn off the package install check |
 | `CTX_GUARD_WINDOW` | 200000 | Assumed context window for % thresholds (Claude Code only; set 1000000 for 1M-window models) |
 | `CTX_GUARD_COPILOT_WINDOW_TOKENS` | 128000 | Assumed window for the Copilot CLI thresholds, which count tool output only; lower it to warn earlier |
 | `CTX_GUARD_LOG_DIR` | /tmp/ctx-guard-\<uid\>/logs | Full-output archive |
+| `CTX_GUARD_LOG_RETENTION_DAYS` | 7 | Archived logs older than this are deleted on every run |
+| `CTX_GUARD_REDACT_LOGS` | 1 | Redact common credential patterns before logs reach the model or remain on disk; set to `0` only for an explicitly trusted local workflow |
 | `CTX_GUARD_STATE_DIR` | /tmp/ctx-guard-\<uid\>/state | Per-session "already warned" markers; if set, `stats.jsonl` lives here too |
 | `CTX_GUARD_STATS_FILE` | `${XDG_STATE_HOME:-~/.local/state}/ctx-guard/stats.jsonl` | Override the stats log location (wins over `CTX_GUARD_STATE_DIR`) |
+| `CTX_GUARD_BARS` | auto | `ctx-guard-stats` bars: `auto` draws them only when stdout is a TTY, `always`/`never` force them on/off |
+| `CTX_GUARD_AGENT` | `unknown` | Tag written into stats events; set to `claude-code`/`copilot-cli` by the installed hook wiring |
 
 If `CTX_GUARD_LOG_DIR` or `CTX_GUARD_STATE_DIR` is not writable -- as happens under an agent sandbox that only permits writes to `$TMPDIR` and the project dir -- `ctx-guard-run` falls back to `$TMPDIR/ctx-guard-<uid>/`. With nowhere writable at all it runs the command uncapped rather than failing it.
 
 Claude Code runs Bash inside a sandbox that can't write the stats file, so measured events from wrapped commands land in that `$TMPDIR` spool. The PostToolUse hook (which runs outside the sandbox) and `ctx-guard-stats` drain spools under `$TMPDIR` and `/tmp/claude*` back into the stats file; set `CTX_GUARD_SPOOL_DIRS` (colon-separated `TMPDIR` roots) to replace that search list. If the stats file can't be written, the spool is left in place and still read.
-| `CTX_GUARD_LOG_RETENTION_DAYS` | 7 | Archived logs older than this are deleted on every run |
-| `CTX_GUARD_REDACT_LOGS` | 1 | Redact common credential patterns before logs reach the model or remain on disk; set to `0` only for an explicitly trusted local workflow |
-| `CTX_GUARD_BARS` | auto | `ctx-guard-stats` bars: `auto` draws them only when stdout is a TTY, `always`/`never` force them on/off |
-| `CTX_GUARD_AGENT` | `unknown` | Tag written into stats events; set to `claude-code`/`copilot-cli` by the installed hook wiring |
 
 **Package allowlist.** To stop the package guard flagging a name (a private
 package, or a real package it mistakes for a typosquat), add it to
@@ -325,15 +251,18 @@ check, including the registry lookup.
 
 Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; edit `PATTERNS` in `auto_delegate.py` for your routing keywords.
 
-## Design notes
+## Learn more
 
-- **Fails open on Claude Code, fails safe everywhere.** Every hook catches all exceptions and always exits 0 with no output on error, which both Claude Code (fails open) and Copilot CLI (fails closed on crashes) treat as "no action, run normally" — never a silent block.
-- **Nothing lost.** Full output always archived (redacted); the model is told the run id and instructed to retrieve slices with `ctx-guard-recall` instead of re-running.
-- **Compound commands** (`a && b; c`) are never pattern-rewritten (too risky) — they go through the generic wrapper: `(set -o pipefail; { <cmd>\n} 2>&1 | ctx-guard-run --filter …)`. The original command stays verbatim, so the agent's permission check (Copilot CLI ignores a hook's `allow`) sees and matches the real commands, and `ctx-guard-run` only ever filters output. In Copilot CLI 1.0.105 (`copilot -p`) wrapped commands needed only the allows the original command needs; no extra allow for `ctx-guard-run`. If an interactive session ever prompts for it, allow it once (`--allow-tool 'shell(ctx-guard-run)'`).
-- **Per-user runtime directory.** Logs/scripts/state live under `/tmp/ctx-guard-<uid>/`, created mode `700`, rather than a shared `/tmp/ctx-guard/` — a single predictable, world-readable path would let other local users on a multi-user host read archived command output (potentially including secrets) or race to control the directory before ctx-guard's first run. `install.sh` deletes the old shared path if present.
-- **Credential-aware output handling.** Environment enumeration (`env`, `printenv`, `set`, and `export`) is denied. Common credential patterns are redacted before logs are retained or returned to the model. Pattern-based redaction cannot identify every secret, so do not treat ctx-guard as a guarantee that arbitrary sensitive data is safe to disclose.
-- Requires a Claude Code version supporting `updatedInput` in `PreToolUse` hooks. On older versions the rewriter is silently inert, but the CLAUDE.md rules and subagents still provide most of the benefit.
-- **Manifest-owned uninstall.** Run `ctx-guard-uninstall` (symlinked onto `PATH` by `install.sh`, or `~/.ctx-guard/bin/ctx-guard-uninstall` by full path). It removes only hook commands, files, symlinks, and rules recorded by the install manifest; modified or unrelated user files are preserved.
+- [How it works](docs/how-it-works.md): every feature in detail, and how the same
+  hooks run under different agents
+- [Compatibility](docs/compatibility.md): what works with which agent
+- [Statistics](docs/statistics.md) and [status line](docs/statusline.md)
+- [Benchmark methodology](docs/benchmark.md), including the package guard's
+  measured catch rate
+- [Security review](docs/security-review.md): what it runs, writes and sends,
+  for whoever approves tools at your company
+- [Security and privacy](SECURITY.md), [Contributing](CONTRIBUTING.md),
+  [Changelog](CHANGELOG.md)
 
 ## License
 

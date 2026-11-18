@@ -16,7 +16,8 @@ jobs:
         with:
           python-version: "3.x"
       - name: Check shell syntax
-        run: bash -n install.sh bin/ctx-guard-run
+        # bash -n parses only its first file, so check each one.
+        run: for f in install.sh get.sh packaging/render.sh bin/ctx-guard bin/ctx-guard-run bin/ctx-guard-try; do bash -n "$f"; done
       - name: Check Python syntax
         run: python3 -m py_compile hooks/*.py hooks/lib/*.py bin/ctx-guard-stats bin/ctx-guard-uninstall
       - name: Check stdlib-only imports and no binaries

@@ -80,10 +80,33 @@ def load_events(path: str, since_ts: float | None) -> list[dict]:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            ev = normalize_event(ev)
+            if ev is None:
+                continue
             if since_ts is not None and ev.get("ts", 0) < since_ts:
                 continue
             events.append(ev)
     return events
+
+
+NUMERIC_FIELDS = ("original_bytes", "returned_bytes", "saved_bytes",
+                  "est_saved_bytes", "duration_ms")
+
+
+def normalize_event(ev) -> dict | None:
+    """Coerce counters to numbers, or drop the event when one is malformed --
+    the same lines ctx-guard-statusline skips -- so a bad line never crashes."""
+    if not isinstance(ev, dict):
+        return None
+    try:
+        if "ts" in ev:
+            ev["ts"] = float(ev["ts"])
+        for key in NUMERIC_FIELDS:
+            if key in ev:
+                ev[key] = int(ev[key])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return ev
 
 
 def spooled_paths(dest: str) -> list[str]:
@@ -474,6 +497,31 @@ def print_gains(g: dict) -> None:
     print_estimate_line(g["estimated"], dot)
 
 
+def statusline_hint() -> str:
+    """A one-line hint when another tool has replaced a status line ctx-guard
+    set up (--statusline) with one that no longer shows our segment."""
+    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..")
+    try:
+        with open(os.path.join(root, "install-manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        ctx_guard_version()  # puts hooks/lib on sys.path
+        import statusline_config
+        agents = [agent for agent, _ in statusline_config.drifted(manifest)]
+    except Exception:
+        return ""
+    if not agents:
+        return ""
+    return (f"Status line: ctx-guard no longer shows in the {', '.join(agents)} status line. "
+            f"Rerun install.sh --statusline, or add `ctx-guard-statusline {agents[0]} --segment` "
+            f"to your status line script.")
+
+
+def print_statusline_hint() -> None:
+    hint = statusline_hint()
+    if hint:
+        print(hint)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize ctx-guard stats.jsonl")
     parser.add_argument("--version", action="version",
@@ -661,6 +709,7 @@ def main() -> None:
 
     if not args.verbose:
         print_gauge(summary)
+        print_statusline_hint()
         return
 
     print(f"ctx-guard stats  ({len(events)} events, file: {args.stats_file})")
@@ -714,6 +763,7 @@ def main() -> None:
     max_est = max((r["saved_tokens"] for _, r in rules), default=0)
     for rule, r in rules:
         print_bar(rule, r["saved_tokens"], max_est, f"~{fmt_tokens(r['saved_tokens'])} ({r['count']})")
+    print_statusline_hint()
 
 
 if __name__ == "__main__":

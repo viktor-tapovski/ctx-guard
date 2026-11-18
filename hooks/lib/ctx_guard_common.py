@@ -31,12 +31,16 @@ import io
 import json
 import os
 import re
+import signal
 import sys
 import time
 from typing import Any, Callable
 
 AGENT = os.environ.get("CTX_GUARD_AGENT", "unknown")
 ANTIGRAVITY = "antigravity-cli"
+CODEX = "codex-cli"
+# Codex reports its unified-exec shell tool by its own name, but matches it as Bash.
+CODEX_SHELL_TOOLS = {"exec_command", "shell", "local_shell"}
 
 # Antigravity CLI sends {"toolCall": {"name", "args"}} with its own tool and
 # argument names; map them to the Claude names the hooks match on.
@@ -96,6 +100,15 @@ def stats_write_path() -> str:
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def env_int(name: str, default: int) -> int:
+    """A positive integer from the environment, or default if unset or invalid."""
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def get_field(payload: dict, *names: str, default: Any = None) -> Any:
     """Return the first present field among `names` (handles casing differences)."""
     for name in names:
@@ -114,6 +127,8 @@ def normalize_tool_call(payload: dict) -> tuple[str, dict]:
             tool_args = {ANTIGRAVITY_ARGS.get(k, k): v for k, v in tool_args.items()}
         return ANTIGRAVITY_TOOLS.get(tool_name, tool_name), tool_args if isinstance(tool_args, dict) else {}
     tool_name = get_field(payload, "tool_name", "toolName", default="") or ""
+    if AGENT == CODEX and tool_name in CODEX_SHELL_TOOLS:
+        tool_name = "Bash"
     tool_args = get_field(payload, "tool_input", "toolArgs", default={})
     if isinstance(tool_args, str):
         try:
@@ -163,6 +178,8 @@ def build_pretooluse_decision(
     permission rules still apply to the (possibly modified) call."""
     if AGENT == ANTIGRAVITY:
         return _antigravity_decision(reason, new_args, decision, additional_context)
+    if AGENT == CODEX:
+        return _codex_decision(reason, new_args, decision, additional_context)
     out: dict = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
     if decision is not None:
         out["permissionDecision"] = decision
@@ -196,11 +213,48 @@ def _antigravity_decision(
     return out
 
 
+def _codex_decision(
+    reason: str, new_args: dict | None, decision: str | None, additional_context: str | None
+) -> dict:
+    """Codex CLI's preToolUse output: Claude's hookSpecificOutput only, since
+    Codex reports unknown fields as a hook error. It has no "ask" and takes
+    updatedInput only with "allow", so a warning drops any rewrite, leaves
+    the decision to Codex's own approval policy, and is shown to the user
+    (systemMessage) and the model (additionalContext)."""
+    spec: dict = {"hookEventName": "PreToolUse"}
+    out: dict = {"hookSpecificOutput": spec}
+    if decision in ("allow", "deny"):
+        spec["permissionDecision"] = decision
+        spec["permissionDecisionReason"] = reason
+        if decision == "allow" and new_args is not None:
+            spec["updatedInput"] = new_args
+    elif decision == "ask":
+        out["systemMessage"] = reason
+        additional_context = f"{reason} | {additional_context}" if additional_context else reason
+    if additional_context:
+        spec["additionalContext"] = additional_context
+    return out
+
+
+# agy kills a hook after its registered 15s timeout and then blocks the call,
+# so the hook allows the call itself before that (registry lookups add up).
+ANTIGRAVITY_DEADLINE_S = 10
+
+
+def _allow_on_deadline(signum, frame) -> None:
+    sys.__stdout__.write(json.dumps({"decision": "allow"}) + "\n")
+    sys.__stdout__.flush()
+    os._exit(0)
+
+
 def run_pretooluse_hook(main: Callable[[], None]) -> None:
     """Run a preToolUse hook's main(). Antigravity CLI blocks the tool call
-    when a preToolUse hook prints no decision or crashes, so a silent
-    pass-through prints an explicit allow there; other agents see main()'s
-    output unchanged."""
+    when a preToolUse hook prints no decision, crashes or times out, so a
+    silent pass-through or a run past ANTIGRAVITY_DEADLINE_S prints an
+    explicit allow there; other agents see main()'s output unchanged."""
+    if AGENT == ANTIGRAVITY and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _allow_on_deadline)
+        signal.alarm(ANTIGRAVITY_DEADLINE_S)
     buffer = io.StringIO()
     try:
         with contextlib.redirect_stdout(buffer):
@@ -213,6 +267,8 @@ def run_pretooluse_hook(main: Callable[[], None]) -> None:
             json.loads(output)
         except ValueError:
             output = json.dumps({"decision": "allow"}) + "\n"
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
     sys.stdout.write(output)
 
 

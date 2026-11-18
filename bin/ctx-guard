@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# ctx-guard: one command for Homebrew and curl installs.
+#
+#   ctx-guard install [--agents LIST] [--yes] [--statusline]
+#   ctx-guard uninstall [--agents LIST]
+#   ctx-guard stats|recall [...]
+#   ctx-guard try
+#   ctx-guard --version
+#
+# It runs the install.sh that ships beside it (a checkout, a release tarball
+# or Homebrew's libexec), which copies the hooks into ~/.ctx-guard. The other
+# subcommands run that installed copy.
+set -euo pipefail
+
+# Resolve symlinks (Homebrew links bin/ctx-guard into its prefix).
+source_path="${BASH_SOURCE[0]}"
+while [ -L "$source_path" ]; do
+  link_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  source_path="$(readlink "$source_path")"
+  case "$source_path" in /*) ;; *) source_path="$link_dir/$source_path" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$source_path")/.." && pwd)"
+INSTALLED="$HOME/.ctx-guard/bin"
+
+usage() {
+  cat << 'EOF'
+Usage: ctx-guard <command> [options]
+
+  install [--agents LIST] [--yes] [--statusline]
+              set up ctx-guard; without --agents, pick agents from a checklist
+  uninstall [--agents LIST]
+              remove ctx-guard, for the listed agents only if given
+  stats [...]     savings so far (ctx-guard-stats)
+  recall [...]    get archived output back (ctx-guard-recall)
+  try             see ctx-guard catch a fake package and trim a test log;
+                  works before install too
+  --version       print the version
+
+Agents: claude-code, copilot-cli, antigravity-cli, codex-cli, or all.
+EOF
+}
+
+# The installed tools are Python scripts; run them with CTX_GUARD_PYTHON when
+# set (Homebrew sets it), since a python3 on PATH may be missing or too old.
+run_installed() {
+  local tool="$INSTALLED/$1"
+  shift
+  if [ ! -x "$tool" ]; then
+    echo "ctx-guard is not installed yet. Run: ctx-guard install" >&2
+    exit 1
+  fi
+  if [ -n "${CTX_GUARD_PYTHON:-}" ]; then
+    exec "$CTX_GUARD_PYTHON" "$tool" "$@"
+  fi
+  exec "$tool" "$@"
+}
+
+command="${1:-}"
+[ $# -gt 0 ] && shift
+case "$command" in
+  install)   exec bash "$ROOT/install.sh" "$@" ;;
+  uninstall) run_installed ctx-guard-uninstall "$@" ;;
+  stats)     run_installed ctx-guard-stats "$@" ;;
+  recall)    run_installed ctx-guard-recall "$@" ;;
+  # The bundled copy, so it works before install.
+  try)       exec bash "$ROOT/bin/ctx-guard-try" "$@" ;;
+  --version|version)
+    sed -n 's/^__version__ = "\([^"]*\)".*/ctx-guard \1/p' "$ROOT/hooks/lib/version.py" ;;
+  ""|-h|--help|help) usage ;;
+  *) echo "Unknown command: $command" >&2; usage >&2; exit 2 ;;
+esac
