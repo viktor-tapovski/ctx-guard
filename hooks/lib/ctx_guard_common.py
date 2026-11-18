@@ -24,15 +24,24 @@ exceptions and exit 0. See pre_bash_rewrite.py's top-level try/except.
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import hashlib
+import io
 import json
 import os
 import re
+import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 AGENT = os.environ.get("CTX_GUARD_AGENT", "unknown")
+ANTIGRAVITY = "antigravity-cli"
+
+# Antigravity CLI sends {"toolCall": {"name", "args"}} with its own tool and
+# argument names; map them to the Claude names the hooks match on.
+ANTIGRAVITY_TOOLS = {"run_command": "Bash"}
+ANTIGRAVITY_ARGS = {"CommandLine": "command"}
 
 STATE_DIR = os.environ.get(
     "CTX_GUARD_STATE_DIR", f"/tmp/ctx-guard-{os.getuid()}/state"
@@ -97,6 +106,13 @@ def get_field(payload: dict, *names: str, default: Any = None) -> Any:
 
 def normalize_tool_call(payload: dict) -> tuple[str, dict]:
     """Return (tool_name, tool_args) regardless of which runtime sent the payload."""
+    tool_call = payload.get("toolCall")
+    if isinstance(tool_call, dict):
+        tool_name = str(tool_call.get("name") or "")
+        tool_args = tool_call.get("args")
+        if isinstance(tool_args, dict):
+            tool_args = {ANTIGRAVITY_ARGS.get(k, k): v for k, v in tool_args.items()}
+        return ANTIGRAVITY_TOOLS.get(tool_name, tool_name), tool_args if isinstance(tool_args, dict) else {}
     tool_name = get_field(payload, "tool_name", "toolName", default="") or ""
     tool_args = get_field(payload, "tool_input", "toolArgs", default={})
     if isinstance(tool_args, str):
@@ -129,7 +145,7 @@ def normalize_tool_result_text(payload: dict) -> str | None:
 
 
 def safe_session_id(payload: dict) -> str:
-    session = get_field(payload, "session_id", "sessionId", default="unknown") or "unknown"
+    session = get_field(payload, "session_id", "sessionId", "conversationId", default="unknown") or "unknown"
     if not SESSION_ID_RE.match(str(session)):
         session = "unknown"
     return str(session)
@@ -145,6 +161,8 @@ def build_pretooluse_decision(
     """Build a preToolUse decision object understood by Claude Code and Copilot CLI.
     decision=None returns no permission decision, so the runtime's normal
     permission rules still apply to the (possibly modified) call."""
+    if AGENT == ANTIGRAVITY:
+        return _antigravity_decision(reason, new_args, decision, additional_context)
     out: dict = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
     if decision is not None:
         out["permissionDecision"] = decision
@@ -158,6 +176,44 @@ def build_pretooluse_decision(
         out["additionalContext"] = additional_context
         out["hookSpecificOutput"]["additionalContext"] = additional_context
     return out
+
+
+def _antigravity_decision(
+    reason: str, new_args: dict | None, decision: str | None, additional_context: str | None
+) -> dict:
+    """Antigravity CLI's preToolUse output: `decision` is required, "allow"
+    defers to the user's permission policy (so a rewrite is never
+    auto-approved), and `overwrite` is merged into toolCall.args. There is
+    no context field, so additional_context rides along in the reason."""
+    out: dict = {"decision": decision or "allow"}
+    if additional_context:
+        reason = f"{reason} | {additional_context}" if reason else additional_context
+    if reason:
+        out["reason"] = reason
+    if new_args is not None:
+        names = {v: k for k, v in ANTIGRAVITY_ARGS.items()}
+        out["overwrite"] = {names[k]: v for k, v in new_args.items() if k in names}
+    return out
+
+
+def run_pretooluse_hook(main: Callable[[], None]) -> None:
+    """Run a preToolUse hook's main(). Antigravity CLI blocks the tool call
+    when a preToolUse hook prints no decision or crashes, so a silent
+    pass-through prints an explicit allow there; other agents see main()'s
+    output unchanged."""
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            main()
+    except Exception as e:  # main() catches its own errors; this is the backstop
+        print(f"[ctx-guard] hook failed: {e}", file=sys.stderr)
+    output = buffer.getvalue()
+    if AGENT == ANTIGRAVITY:
+        try:
+            json.loads(output)
+        except ValueError:
+            output = json.dumps({"decision": "allow"}) + "\n"
+    sys.stdout.write(output)
 
 
 def build_posttooluse_context(message: str) -> dict:
