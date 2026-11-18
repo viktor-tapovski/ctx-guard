@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# ctx-guard-try: see ctx-guard work in about 10 seconds, without an agent.
+#
+#   ctx-guard try        (or: ctx-guard-try)
+#
+# It sends the installed hooks the same input an agent would, and runs
+# ctx-guard-run and ctx-guard-recall on a made-up test log. Nothing is
+# installed, and stats and logs go to a temporary directory that is deleted
+# afterwards, so your real numbers are untouched.
+set -euo pipefail
+
+# Resolve symlinks (~/.local/bin links here).
+source_path="${BASH_SOURCE[0]}"
+while [ -L "$source_path" ]; do
+  link_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  source_path="$(readlink "$source_path")"
+  case "$source_path" in /*) ;; *) source_path="$link_dir/$source_path" ;; esac
+done
+BIN="$(cd -P "$(dirname "$source_path")" && pwd)"
+HOOKS="$BIN/../hooks"
+# install.sh replaces "python3" with the interpreter it chose.
+PYTHON_BIN="python3"
+PYTHON="${CTX_GUARD_PYTHON:-$PYTHON_BIN}"
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/ctx-guard-try-XXXXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+export CTX_GUARD_LOG_DIR="$WORK/logs" CTX_GUARD_STATE_DIR="$WORK/state" \
+  CTX_GUARD_STATS_FILE="$WORK/state/stats.jsonl" CTX_GUARD_AGENT=try
+mkdir -p "$CTX_GUARD_LOG_DIR" "$CTX_GUARD_STATE_DIR"
+chmod 700 "$WORK" "$CTX_GUARD_LOG_DIR" "$CTX_GUARD_STATE_DIR"
+
+if [ -t 1 ]; then
+  step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+else
+  step() { printf '\n%s\n' "$1"; }
+fi
+
+step "1. Your agent tries to install a misspelled package"
+echo "   \$ pip install reqeusts"
+payload='{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"try","cwd":"'"$WORK"'","tool_input":{"command":"pip install reqeusts"}}'
+decision="$(printf '%s' "$payload" | "$PYTHON" "$HOOKS/pre_bash_rewrite.py")"
+printf '%s' "$decision" | "$PYTHON" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    reason = d["hookSpecificOutput"]["permissionDecisionReason"]
+except (ValueError, KeyError, TypeError):
+    sys.exit("   ctx-guard did not flag it. Is CTX_GUARD_PKG_CHECK set to 0?")
+print("   " + reason.split(". Allowlist:")[0] + ".")
+print("   Nothing was installed. (Offline, the registry check is skipped and"
+      " the lookalike name is flagged instead.)")
+'
+
+step "2. Your agent runs a test suite with 3,000 lines of output"
+cat > "$WORK/tests.sh" << 'EOF'
+for i in $(seq 1 2998); do echo "ok - test $i"; done
+echo "using token ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+echo "FAIL src/auth.test.ts:42 expected 200, received 401"
+exit 1
+EOF
+summary="$("$BIN/ctx-guard-run" "$WORK/tests.sh" try)" || true
+echo "   The agent gets $(printf '%s\n' "$summary" | wc -l | tr -d ' ') lines instead. Without the passing tests, that's:"
+printf '%s\n' "$summary" | grep -v '^ok - test' | sed 's/^/   /'
+
+step "3. Your agent pulls just the lines it needs from the full log"
+run_id="$(printf '%s\n' "$summary" | sed -n 's/.*ctx-guard-recall show \(run-[A-Za-z0-9]*\).*/\1/p')"
+echo "   \$ ctx-guard-recall show $run_id --grep token"
+"$PYTHON" "$BIN/ctx-guard-recall" show "$run_id" --grep token | sed 's/^/   /'
+echo "   The token was masked before the log was saved."
+
+step "Once ctx-guard is installed, your agent gets this on every command."

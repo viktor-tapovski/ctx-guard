@@ -31,6 +31,7 @@ import io
 import json
 import os
 import re
+import signal
 import sys
 import time
 from typing import Any, Callable
@@ -97,6 +98,15 @@ def stats_write_path() -> str:
 
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def env_int(name: str, default: int) -> int:
+    """A positive integer from the environment, or default if unset or invalid."""
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def get_field(payload: dict, *names: str, default: Any = None) -> Any:
@@ -226,11 +236,25 @@ def _codex_decision(
     return out
 
 
+# agy kills a hook after its registered 15s timeout and then blocks the call,
+# so the hook allows the call itself before that (registry lookups add up).
+ANTIGRAVITY_DEADLINE_S = 10
+
+
+def _allow_on_deadline(signum, frame) -> None:
+    sys.__stdout__.write(json.dumps({"decision": "allow"}) + "\n")
+    sys.__stdout__.flush()
+    os._exit(0)
+
+
 def run_pretooluse_hook(main: Callable[[], None]) -> None:
     """Run a preToolUse hook's main(). Antigravity CLI blocks the tool call
-    when a preToolUse hook prints no decision or crashes, so a silent
-    pass-through prints an explicit allow there; other agents see main()'s
-    output unchanged."""
+    when a preToolUse hook prints no decision, crashes or times out, so a
+    silent pass-through or a run past ANTIGRAVITY_DEADLINE_S prints an
+    explicit allow there; other agents see main()'s output unchanged."""
+    if AGENT == ANTIGRAVITY and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _allow_on_deadline)
+        signal.alarm(ANTIGRAVITY_DEADLINE_S)
     buffer = io.StringIO()
     try:
         with contextlib.redirect_stdout(buffer):
@@ -243,6 +267,8 @@ def run_pretooluse_hook(main: Callable[[], None]) -> None:
             json.loads(output)
         except ValueError:
             output = json.dumps({"decision": "allow"}) + "\n"
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
     sys.stdout.write(output)
 
 

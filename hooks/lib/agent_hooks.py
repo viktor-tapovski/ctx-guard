@@ -3,8 +3,8 @@ How ctx-guard adds its hooks to agents whose hook file it shares with the
 user's own hooks, and takes them out again. Used by install.sh and by
 ctx-guard-uninstall. (Claude Code and Copilot CLI are wired in install.sh.)
 
-To support another agent, add a Target to TARGETS: where its hooks file
-lives, how to tell it's installed, and how to add and remove ctx-guard's
+To support another agent, add it to agents.py, then add a Target to
+TARGETS: where its hooks file lives, and how to add and remove ctx-guard's
 entries in the parsed JSON. Everything else in the file is left as it was.
 
 The manifest keeps, per agent, the file's exact text from before install.
@@ -18,8 +18,9 @@ import hashlib
 import json
 import os
 import shlex
-import shutil
 from typing import Callable, NamedTuple
+
+import agents
 
 
 def hook_command(agent: str, dest: str, python_bin: str, script: str) -> str:
@@ -30,7 +31,6 @@ def hook_command(agent: str, dest: str, python_bin: str, script: str) -> str:
 class Target(NamedTuple):
     agent: str                                  # CTX_GUARD_AGENT value, also the manifest key
     config: Callable[[str], str]                # home -> hooks file path
-    is_installed: Callable[[str], bool]         # home -> agent present on this machine
     add: Callable[[dict, str, str], None]       # (config, dest, python_bin), in place
     remove: Callable[[dict], bool]              # config, in place; True if anything was removed
 
@@ -44,8 +44,20 @@ ANTIGRAVITY = "antigravity-cli"
 ANTIGRAVITY_HOOK_NAME = "ctx-guard"
 
 
+# agy blocks the tool call when the hook prints no decision, so the shell
+# prints an allow itself when Python can't run at all: the interpreter is
+# gone (say, after brew autoremove) or an import fails.
+ANTIGRAVITY_ALLOW = """{"decision":"allow"}"""
+
+
+def antigravity_command(dest: str, python_bin: str) -> str:
+    run = hook_command(ANTIGRAVITY, dest, python_bin, "pre_bash_rewrite.py")
+    return (f'out="$({run})"; if [ -n "$out" ]; then printf \'%s\\n\' "$out"; '
+            f"else echo '{ANTIGRAVITY_ALLOW}'; fi")
+
+
 def _antigravity_add(config: dict, dest: str, python_bin: str) -> None:
-    command = hook_command(ANTIGRAVITY, dest, python_bin, "pre_bash_rewrite.py")
+    command = antigravity_command(dest, python_bin)
     config[ANTIGRAVITY_HOOK_NAME] = {
         "PreToolUse": [
             {
@@ -66,10 +78,6 @@ def _antigravity_remove(config: dict) -> bool:
 # output shape for Bash is undocumented, so only the preToolUse hook runs.
 
 CODEX = "codex-cli"
-
-
-def _codex_home(home: str) -> str:
-    return os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
 
 
 def _codex_command_is_ours(command: object) -> bool:
@@ -116,16 +124,12 @@ TARGETS = [
     Target(
         ANTIGRAVITY,
         config=lambda home: os.path.join(home, ".gemini", "config", "hooks.json"),
-        # ~/.gemini/antigravity-cli appears once agy has run; Gemini CLI alone doesn't create it.
-        is_installed=lambda home: os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli"))
-        or shutil.which("agy") is not None,
         add=_antigravity_add,
         remove=_antigravity_remove,
     ),
     Target(
         CODEX,
-        config=lambda home: os.path.join(_codex_home(home), "hooks.json"),
-        is_installed=lambda home: os.path.isdir(_codex_home(home)) or shutil.which("codex") is not None,
+        config=lambda home: os.path.join(agents.codex_home(home), "hooks.json"),
         add=_codex_add,
         remove=_codex_remove,
     ),
@@ -151,8 +155,10 @@ def _write(path: str, text: str) -> None:
     os.replace(temporary, path)
 
 
-def install_target(target: Target, manifest: dict, home: str, dest: str, python_bin: str) -> None:
-    if not target.is_installed(home):
+def install_target(target: Target, manifest: dict, home: str, dest: str, python_bin: str,
+                   require_installed: bool = True) -> None:
+    """require_installed=False when the user chose this agent explicitly."""
+    if require_installed and not agents.get(target.agent).detect(home):
         return
     hook_files = manifest.setdefault("hook_files", {})
     path = target.config(home)
@@ -238,11 +244,19 @@ def restore_target(target: Target, manifest: dict) -> None:
             pass
 
 
-def install(manifest: dict, home: str, dest: str, python_bin: str) -> None:
+def install(manifest: dict, home: str, dest: str, python_bin: str,
+            selected: list[str] | None = None) -> None:
+    """selected: the agents the user chose (installed even if not detected);
+    None installs for every detected agent."""
     for target in TARGETS:
-        install_target(target, manifest, home, dest, python_bin)
+        if selected is None:
+            install_target(target, manifest, home, dest, python_bin)
+        elif target.agent in selected:
+            install_target(target, manifest, home, dest, python_bin, require_installed=False)
 
 
-def restore(manifest: dict) -> None:
+def restore(manifest: dict, selected: list[str] | None = None) -> None:
     for target in TARGETS:
-        restore_target(target, manifest)
+        if selected is None or target.agent in selected:
+            restore_target(target, manifest)
+            manifest.get("hook_files", {}).pop(target.agent, None)

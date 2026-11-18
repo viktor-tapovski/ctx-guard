@@ -25,9 +25,20 @@ import shlex
 import subprocess
 import sys
 
+
+def _exit_quietly(exc_type, exc, tb) -> None:
+    """Backstop for a crash before main()'s own handler, such as a failed
+    import: Copilot CLI denies the tool call when a hook exits non-zero."""
+    print(f"[ctx-guard] hook failed: {exc}", file=sys.stderr, flush=True)
+    os._exit(0)
+
+
+sys.excepthook = _exit_quietly
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
     AGENT,
+    CODEX,
     PENDING_DIR,
     PENDING_MAX_AGE_S,
     build_pretooluse_decision,
@@ -84,6 +95,9 @@ REWRITES = [
     ("pkg-list", re.compile(r"^(npm ls|pip list|pip3 list)\b(?!.*\|\s*(head|tail|wc))(.*)$"),
      r"\1\3 | head -50"),
 ]
+
+# Rules that run the whole command under ctx-guard-run.
+WRAP_RULES = ("compound-wrap", "runner-wrap")
 
 # Test/build runners: pipe through an error filter, keep the tail.
 RUNNERS = re.compile(
@@ -309,6 +323,12 @@ def main() -> None:
             print(json.dumps(decision))
             return
 
+        if AGENT == CODEX and (pkg_warning or rule in WRAP_RULES):
+            # Codex applies a rewrite only with "allow", which may also skip
+            # its approval policy. A wrapped command can be anything, and a
+            # warning must reach the user, so leave both to Codex unchanged.
+            new_cmd = cmd
+
         if new_cmd == cmd:
             if pkg_warning:
                 decision = build_pretooluse_decision(
@@ -325,7 +345,7 @@ def main() -> None:
             before, after = measured
             extra = {"original_bytes": before, "returned_bytes": after,
                      "saved_bytes": max(0, before - after)}
-        elif rule not in ("compound-wrap", "runner-wrap"):
+        elif rule not in WRAP_RULES:
             mark_pending(payload, rule, cmd)
         record_stats_event("rewrite", rule=rule, tool_name=tool_name, **extra)
         reason = f"ctx-guard: rewrote to token-efficient form ({rule})"
@@ -335,7 +355,13 @@ def main() -> None:
             # A pkg warning must surface the human permission prompt, not auto-approve.
             decision = build_pretooluse_decision(reason=reason, new_args=new_args, decision="ask")
         else:
-            decision = build_pretooluse_decision(reason=reason, new_args=new_args)
+            # No permission decision: "allow" would skip the agent's own
+            # approval rules for whatever command was wrapped. Codex is the
+            # exception, since it applies a rewrite only with "allow" (and
+            # gets only read-only rewrites, see above).
+            decision = build_pretooluse_decision(
+                reason=reason, new_args=new_args,
+                decision="allow" if AGENT == CODEX else None)
         print(json.dumps(decision))
     except Exception as e:
         # Fail open on Claude Code; on Copilot CLI a crash would deny the
