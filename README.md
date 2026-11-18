@@ -259,6 +259,8 @@ Edit `REWRITES` / `RUNNERS` in `pre_bash_rewrite.py` to add your own commands; e
 - [Statistics](docs/statistics.md) and [status line](docs/statusline.md)
 - [Benchmark methodology](docs/benchmark.md), including the package guard's
   measured catch rate
+- [Security review](docs/security-review.md): what it runs, writes and sends,
+  for whoever approves tools at your company
 - [Security and privacy](SECURITY.md), [Contributing](CONTRIBUTING.md),
   [Changelog](CHANGELOG.md)
 

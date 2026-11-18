@@ -30,9 +30,13 @@ Usage stats (`stats.jsonl`, byte counts and rule names, no command output) persi
 `${XDG_STATE_HOME:-~/.local/state}/ctx-guard/` (dir `700`, file `600`).
 
 The interceptor denies `env`, `printenv`, `set`, and `export` commands because
-they commonly expose credentials. It also redacts common bearer tokens, API
-keys, passwords, private-key blocks, and known token formats before output is
-returned to the model or retained in the default log.
+they commonly expose credentials. For commands it wraps through
+`ctx-guard-run` (test runners, builds, compound commands), it also redacts
+common bearer tokens, API keys, passwords, private-key blocks, and known token
+formats before output is returned to the model or retained in the default log.
+Output from commands it only rewrites (such as `git status`) and from the
+agent's built-in file tools reaches the agent unfiltered, as it would without
+ctx-guard.
 
 ### What redaction catches
 
@@ -102,7 +106,9 @@ unredacted command output.
 - Compound commands are wrapped rather than rewritten with targeted patterns.
 - Session identifiers are validated before being used in state-file names.
 - `ctx-guard-uninstall` removes only exact manifest-owned configuration entries
-  and preserves modified user files.
+  and preserves modified user files. A full uninstall deletes `~/.ctx-guard`,
+  including a `~/.ctx-guard/pkg-allowlist` you created there; per-repo
+  `.ctx-guard/pkg-allowlist` files are not touched.
 - Package-install registry lookups fail open on any network error (timeout,
   DNS failure, unexpected status) rather than blocking the command.
 - `~/.ctx-guard/pkg-allowlist` and `.ctx-guard/pkg-allowlist` are read-only
