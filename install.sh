@@ -9,11 +9,20 @@ set -euo pipefail
 usage() {
   cat << 'EOF'
 Usage: install.sh [--agents LIST] [--yes] [--statusline]
+       install.sh --statusline-preset NAME | --statusline-format TEMPLATE
 
   --agents LIST   set up these agents only, comma-separated, or "all":
                   claude-code, copilot-cli, antigravity-cli, codex-cli
   --yes, -y       don't ask; set up the agents detected on this machine
   --statusline    also add ctx-guard's savings to each agent's status line
+  --statusline-preset NAME
+                  shape the status line segment with a bundled preset:
+                  default, minimal, security, full, powerline
+  --statusline-format TEMPLATE
+                  ... or with your own template, e.g. '⬇ {today_all}'
+                  (both write ~/.config/ctx-guard/statusline.json; on their
+                  own they change nothing else and skip the install; preview
+                  the presets with: ctx-guard-statusline --preview)
 
 Without --agents or --yes, a checklist lets you pick agents with the arrow
 keys and space. Re-running with fewer agents removes ctx-guard from the
@@ -24,17 +33,28 @@ EOF
 STATUSLINE=0
 AGENTS_ARG=""
 ASSUME_YES=0
+SL_PRESET=""
+SL_FORMAT=""
+SL_CONFIG=0
+INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --statusline) STATUSLINE=1 ;;
-    --agents) [ $# -ge 2 ] || { echo "--agents needs a value" >&2; exit 2; }; AGENTS_ARG="$2"; shift ;;
-    --agents=*) AGENTS_ARG="${1#--agents=}" ;;
-    --yes|-y) ASSUME_YES=1 ;;
+    --statusline) STATUSLINE=1; INSTALL=1 ;;
+    --statusline-preset) [ $# -ge 2 ] || { echo "--statusline-preset needs a value" >&2; exit 2; }; SL_PRESET="$2"; SL_CONFIG=1; shift ;;
+    --statusline-preset=*) SL_PRESET="${1#--statusline-preset=}"; SL_CONFIG=1 ;;
+    --statusline-format) [ $# -ge 2 ] || { echo "--statusline-format needs a value" >&2; exit 2; }; SL_FORMAT="$2"; SL_CONFIG=1; shift ;;
+    --statusline-format=*) SL_FORMAT="${1#--statusline-format=}"; SL_CONFIG=1 ;;
+    --agents) [ $# -ge 2 ] || { echo "--agents needs a value" >&2; exit 2; }; AGENTS_ARG="$2"; INSTALL=1; shift ;;
+    --agents=*) AGENTS_ARG="${1#--agents=}"; INSTALL=1 ;;
+    --yes|-y) ASSUME_YES=1; INSTALL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+if [ -n "$SL_PRESET" ] && [ -n "$SL_FORMAT" ]; then
+  echo "Use --statusline-preset or --statusline-format, not both" >&2; exit 2
+fi
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/.ctx-guard"
@@ -67,13 +87,73 @@ fi
 # Every `python3` below runs the interpreter chosen above.
 python3() { "$PYTHON_BIN" "$@"; }
 
+# --- Status line config (--statusline-preset / --statusline-format) ---
+# Writes ~/.config/ctx-guard/statusline.json, read by ctx-guard-statusline on
+# every refresh. The manifest (when ctx-guard is installed) records whether
+# this created the file, so uninstall removes only a file it made. With no
+# other option, that is all this run does.
+write_statusline_config() {
+python3 - "$SRC" "$MANIFEST" "$SL_PRESET" "$SL_FORMAT" << 'PYEOF'
+import json, os, sys
+
+src, manifest_path, preset, template = sys.argv[1:5]
+sys.path.insert(0, os.path.join(src, "hooks", "lib"))
+import statusline_format
+
+manifest = None
+if os.path.isfile(manifest_path):
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+try:
+    path = statusline_format.write_config(manifest, preset=preset or None,
+                                          template=template or None)
+except (OSError, ValueError) as e:
+    raise SystemExit(f"Status line config not written: {e}")
+if manifest is not None:
+    temporary = manifest_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, manifest_path)
+what = f"preset {preset}" if preset else "your template"
+print(f"Status line config written to {path} ({what})")
+PYEOF
+}
+if [ "$SL_CONFIG" = 1 ]; then
+  # Check the preset or template before installing anything.
+  python3 - "$SRC" "$SL_PRESET" "$SL_FORMAT" << 'PYEOF' || exit 2
+import os, sys
+
+src, preset, template = sys.argv[1:4]
+sys.path.insert(0, os.path.join(src, "hooks", "lib"))
+import statusline_format
+
+if preset and preset not in statusline_format.PRESETS:
+    raise SystemExit(f"Unknown status line preset {preset!r}; "
+                     f"choose from {', '.join(statusline_format.PRESETS)}")
+try:
+    statusline_format.parse(template)
+except ValueError as e:
+    raise SystemExit(f"Invalid status line template: {e}")
+PYEOF
+  if [ "$INSTALL" = 0 ]; then
+    write_statusline_config
+    echo "Preview the presets with: ctx-guard-statusline --preview"
+    exit 0
+  fi
+fi
+
 # --- Which agents ------------------------------------------------------------
 # Previously installed agents (from the manifest) are pre-ticked in the
 # checklist along with the detected ones; any of them left out now is removed.
+# Without the checklist they are kept, even when no longer detected: only
+# --agents or the checklist removes an agent.
 PREVIOUS=""
 if [ -f "$MANIFEST" ]; then
-  PREVIOUS="$(python3 - "$MANIFEST" << 'PYEOF'
+  PREVIOUS="$(python3 - "$MANIFEST" "$SRC/hooks/lib" << 'PYEOF'
 import json, sys
+sys.path.insert(0, sys.argv[2])
+import agents
 with open(sys.argv[1], encoding="utf-8") as f:
     m = json.load(f)
 if "installed_agents" in m:
@@ -81,7 +161,7 @@ if "installed_agents" in m:
 else:  # manifests from before agent selection
     found = (["claude-code"] if m.get("claude_settings") else []) + \
             (["copilot-cli"] if m.get("copilot_hooks_file") else []) + list(m.get("hook_files", {}))
-print(",".join(found))
+print(",".join(agent for agent in found if agent in agents.IDS))
 PYEOF
 )"
 fi
@@ -93,6 +173,9 @@ elif [ "$ASSUME_YES" = 0 ] && [ -t 1 ] && { : < /dev/tty; } 2>/dev/null; then
   AGENTS="$(python3 "$SRC/hooks/lib/agent_picker.py" --preselect "$PREVIOUS,$DETECTED")"
 else
   AGENTS="$DETECTED"
+  if [ -n "$PREVIOUS" ]; then
+    AGENTS="$(python3 "$SRC/hooks/lib/agents.py" parse "$PREVIOUS,$DETECTED")"
+  fi
   if [ -z "$AGENTS" ]; then
     echo "No supported agent found on this machine. Choose with --agents, e.g. --agents claude-code" >&2
     exit 1
@@ -124,11 +207,33 @@ rm -rf /tmp/ctx-guard 2>/dev/null || true
 # versions, now superseded by the shared $DEST above.
 rm -rf "$HOME/.claude/ctx-guard" 2>/dev/null || true
 
-cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-recall" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
+cp "$SRC/bin/ctx-guard-run" "$SRC/bin/ctx-guard-recall" "$SRC/bin/ctx-guard-stats" "$SRC/bin/ctx-guard-statusline" "$SRC/bin/ctx-guard-try" "$SRC/bin/ctx-guard-uninstall" "$DEST/bin/"
 cp "$SRC"/hooks/*.py                   "$DEST/hooks/"
 cp "$SRC"/hooks/lib/*.py               "$DEST/hooks/lib/"
 cp "$SRC"/hooks/lib/popular_packages/*.txt "$DEST/hooks/lib/popular_packages/"
-chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-recall" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
+chmod +x "$DEST/bin/ctx-guard-run" "$DEST/bin/ctx-guard-recall" "$DEST/bin/ctx-guard-stats" "$DEST/bin/ctx-guard-statusline" "$DEST/bin/ctx-guard-try" "$DEST/bin/ctx-guard-uninstall" "$DEST"/hooks/*.py
+
+# Point the installed tools at the interpreter chosen above, since the
+# agent's PATH and ~/.local/bin callers may find no python3, or an older one.
+python3 - "$DEST/bin" "$PYTHON_BIN" << 'PYEOF'
+import os, shlex, sys
+bin_dir, python_bin = sys.argv[1], sys.argv[2]
+
+def rewrite(name, old, new):
+    path = os.path.join(bin_dir, name)
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if old in text:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new, 1))
+
+for name in ("ctx-guard-run", "ctx-guard-try"):
+    rewrite(name, '\nPYTHON_BIN="python3"\n', f"\nPYTHON_BIN={shlex.quote(python_bin)}\n")
+# A shebang can't hold spaces, and Linux caps its length.
+if not any(c.isspace() for c in python_bin) and len(python_bin) < 120:
+    for name in ("ctx-guard-recall", "ctx-guard-stats", "ctx-guard-statusline", "ctx-guard-uninstall"):
+        rewrite(name, "#!/usr/bin/env python3\n", f"#!{python_bin}\n")
+PYEOF
 
 python3 - "$MANIFEST" <<'PYEOF'
 import json
@@ -199,14 +304,16 @@ os.chmod(manifest_path, 0o600)
 PYEOF
 fi
 
-# Symlink recall/stats/uninstall into ~/.local/bin so they're callable as plain
-# commands (`ctx-guard-recall`, `ctx-guard-stats`, `ctx-guard-uninstall`) if
+# Symlink recall/stats/statusline/try/uninstall into ~/.local/bin so they're callable as
+# plain commands (`ctx-guard-recall`, `ctx-guard-stats`, ...) if
 # that dir is on PATH.
 # ctx-guard-run is intentionally not symlinked -- it's an internal wrapper
 # invoked by the hooks themselves, not something a user runs directly.
 mkdir -p "$LOCAL_BIN"
 ln -sf "$DEST/bin/ctx-guard-recall" "$LOCAL_BIN/ctx-guard-recall"
 ln -sf "$DEST/bin/ctx-guard-stats" "$LOCAL_BIN/ctx-guard-stats"
+ln -sf "$DEST/bin/ctx-guard-statusline" "$LOCAL_BIN/ctx-guard-statusline"
+ln -sf "$DEST/bin/ctx-guard-try" "$LOCAL_BIN/ctx-guard-try"
 ln -sf "$DEST/bin/ctx-guard-uninstall" "$LOCAL_BIN/ctx-guard-uninstall"
 case ":$PATH:" in
   *":$LOCAL_BIN:"*) ;;
@@ -390,6 +497,10 @@ manifest.update({
             os.path.join(dest, "bin", "ctx-guard-recall"),
         os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-stats"):
             os.path.join(dest, "bin", "ctx-guard-stats"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-statusline"):
+            os.path.join(dest, "bin", "ctx-guard-statusline"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-try"):
+            os.path.join(dest, "bin", "ctx-guard-try"),
         os.path.join(os.path.expanduser("~"), ".local", "bin", "ctx-guard-uninstall"):
             os.path.join(dest, "bin", "ctx-guard-uninstall"),
     },
@@ -445,6 +556,7 @@ os.chmod(temporary, 0o600)
 os.replace(temporary, manifest_path)
 PYEOF
 fi
+if [ "$SL_CONFIG" = 1 ]; then write_statusline_config; fi
 
 echo ""
 echo "Done."
@@ -453,6 +565,7 @@ if has_agent copilot-cli; then echo "Copilot CLI: restart it, then verify with: 
 if has_agent antigravity-cli; then echo "Antigravity CLI: restart it, then verify with: /hooks"; fi
 if has_agent codex-cli; then echo "Codex CLI: restart it, then open /hooks and trust the ctx-guard hook (Codex skips it until you do)"; fi
 echo ""
+echo "See it work right now with:   ctx-guard-try"
 echo "Check savings any time with: ctx-guard-stats"
 echo "Uninstall any time with:     ctx-guard-uninstall"
 [ "$STATUSLINE" = 1 ] || echo "Optional live savings in the status line: rerun the install with --statusline"

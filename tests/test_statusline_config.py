@@ -125,6 +125,25 @@ class TestStatuslineConfig(unittest.TestCase):
         sc.restore(manifest)
         self.assertNotIn("statusLine", self.read_json(".claude/settings.json"))
 
+    def test_drifted_reports_replaced_status_lines_only(self):
+        manifest = {}
+        with mock.patch("sys.stdout", new=open(os.devnull, "w")):
+            sc.install(manifest, self.home, self.dest, "python3")
+        self.assertEqual(sc.drifted(manifest), [])
+        self.assertEqual(sc.drifted({}), [])
+        # Another installer replaced Claude's line with a script.
+        script = self.path("statusline.sh")
+        with open(script, "w") as f:
+            f.write("echo theirs\n")
+        self.write_json(".claude/settings.json",
+                        {"statusLine": {"type": "command", "command": f"bash {script}"}})
+        self.assertEqual(sc.drifted(manifest),
+                         [("claude-code", self.path(".claude/settings.json"))])
+        # ... which embeds our segment: no longer drifted.
+        with open(script, "a") as f:
+            f.write("ctx-guard-statusline claude-code --segment\n")
+        self.assertEqual(sc.drifted(manifest), [])
+
 
 if __name__ == "__main__":
     unittest.main()

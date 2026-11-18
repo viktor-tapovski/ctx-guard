@@ -139,3 +139,44 @@ def restore(manifest: dict, selected: list[str] | None = None) -> None:
         fmt.restore(doc, entry.get("previous"))
         fmt.save(path, doc)
         print(f"Restored {agent} status line in {path}")
+
+
+def _calls_segment(command: str) -> bool:
+    """Whether command runs ctx-guard-statusline itself or through a script it
+    names (a statusline.sh calling `ctx-guard-statusline <agent> --segment`)."""
+    if "ctx-guard-statusline" in command:
+        return True
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    for word in words:
+        path = os.path.expanduser(word)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                if b"ctx-guard-statusline" in f.read(1024 * 1024):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def drifted(manifest: dict) -> list[tuple[str, str]]:
+    """(agent, settings file) for each status line ctx-guard set that another
+    tool has since replaced with one that doesn't call ctx-guard-statusline.
+    Empty unless the user opted in with --statusline."""
+    found = []
+    for agent, entry in (manifest.get("statusline") or {}).items():
+        fmt = FORMATS.get(entry.get("format", "json"))
+        path = entry.get("settings_file", "")
+        if fmt is None or not os.path.isfile(path):
+            continue
+        try:
+            command = fmt.command_of(fmt.current(fmt.load(path)))
+        except (OSError, ValueError):
+            continue
+        if not _calls_segment(command):
+            found.append((agent, path))
+    return found

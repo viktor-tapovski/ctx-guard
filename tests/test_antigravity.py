@@ -11,6 +11,7 @@ import copy
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -108,7 +109,8 @@ class RewriteParityTest(HookTestCase):
                 spec = claude.get("hookSpecificOutput", {})
 
                 self.assertEqual(agy["decision"], spec.get("permissionDecision") or "allow")
-                self.assertEqual(agy.get("reason"), spec.get("permissionDecisionReason"))
+                if "permissionDecision" in spec:
+                    self.assertEqual(agy.get("reason"), spec["permissionDecisionReason"])
                 if "updatedInput" in spec:
                     # Wrapped commands name the agent in ctx-guard-run's --filter tag.
                     expected = spec["updatedInput"]["command"].replace(
@@ -218,8 +220,33 @@ class InstallTest(unittest.TestCase):
         group = config["ctx-guard"]["PreToolUse"][0]
         self.assertEqual(group["matcher"], "run_command")
         self.assertEqual(group["hooks"][0]["command"],
-                         "CTX_GUARD_AGENT=antigravity-cli /usr/bin/python3 '/opt/ctx guard/hooks/pre_bash_rewrite.py'")
+                         agent_hooks.antigravity_command("/opt/ctx guard", "/usr/bin/python3"))
+        self.assertIn("CTX_GUARD_AGENT=antigravity-cli /usr/bin/python3 '/opt/ctx guard/hooks/pre_bash_rewrite.py'",
+                      group["hooks"][0]["command"])
         self.assertEqual(group["hooks"][0]["timeout"], 15)
+        self.assertLess(ctx_guard_common.ANTIGRAVITY_DEADLINE_S, 15)
+
+    def run_command(self, python_bin):
+        command = agent_hooks.antigravity_command(REPO_ROOT, python_bin)
+        payload = json.dumps(load_fixture("pre_tool_use_run_command.json"))
+        # The real hook runs here, so keep its stats and logs out of the user's.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CTX_GUARD_STATE_DIR": tmp, "CTX_GUARD_LOG_DIR": tmp,
+                   "CTX_GUARD_STATS_FILE": os.path.join(tmp, "stats.jsonl")}
+            return subprocess.run(["sh", "-c", command], input=payload, capture_output=True,
+                                  text=True, env=env, timeout=30).stdout
+
+    def test_command_allows_when_python_cannot_run(self):
+        self.assertEqual(json.loads(self.run_command("/nonexistent/python3")), {"decision": "allow"})
+        self.assertIn("decision", json.loads(self.run_command(sys.executable)))
+
+    def test_slow_hook_allows_before_the_agy_timeout(self):
+        code = ("import sys, time; sys.path.insert(0, sys.argv[1]); import ctx_guard_common as c; "
+                "c.ANTIGRAVITY_DEADLINE_S = 1; c.run_pretooluse_hook(lambda: time.sleep(20))")
+        env = {**os.environ, "CTX_GUARD_AGENT": "antigravity-cli"}
+        out = subprocess.run([sys.executable, "-c", code, os.path.join(REPO_ROOT, "hooks", "lib")],
+                             env=env, capture_output=True, text=True, timeout=10).stdout
+        self.assertEqual(json.loads(out), {"decision": "allow"})
 
     def test_existing_file_restored_byte_identical(self):
         original = b'{ "other-hook": {"Stop": [{"command": "./x.sh"}]} }'  # odd spacing, no newline

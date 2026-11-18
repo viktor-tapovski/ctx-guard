@@ -28,8 +28,19 @@ import json
 import os
 import sys
 
+
+def _exit_quietly(exc_type, exc, tb) -> None:
+    """Backstop for a crash before main()'s own handler, such as a failed
+    import: Copilot CLI denies the tool call when a hook exits non-zero."""
+    print(f"[ctx-guard] hook failed: {exc}", file=sys.stderr, flush=True)
+    os._exit(0)
+
+
+sys.excepthook = _exit_quietly
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ctx_guard_common import (  # noqa: E402
+    env_int,
     PENDING_DIR,
     PENDING_MAX_AGE_S,
     build_pretooluse_decision,
@@ -52,14 +63,6 @@ NON_TEXT_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif", ".tiff",
     ".pdf", ".ipynb",
 }
-
-
-def env_int(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, default))
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 def count_lines(path: str) -> int | None:
