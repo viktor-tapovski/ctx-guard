@@ -17,6 +17,7 @@ import statusline_format as sf  # noqa: E402
 STATUSLINE = os.path.join(REPO_ROOT, "bin", "ctx-guard-statusline")
 # 2.0k (~1.0k) today, 13.0k (~1.0k) total, in tokens (bytes/4).
 TOTALS = {"today": [8000, 4000], "total": [52000, 4000], "pkg_flagged": 5, "redacted": 2}
+PRESET_MINIMAL = {"preset": "minimal"}
 SESSION = {"model": {"display_name": "Opus"}, "cwd": "/work/app",
            "context_window": {"used_percentage": 72}}
 
@@ -86,6 +87,21 @@ class TestOptions(unittest.TestCase):
     def test_units_bytes(self):
         self.assertEqual(seg({"units": "bytes", "template": "{today} {total_pair}"}),
                          "7.8KB 50.8KB (~3.9KB)")
+
+    def test_checked_shows_when_nothing_saved_today(self):
+        quiet = {"today": [0, 0], "total": [52000, 4000], "checked_today": 42}
+        self.assertEqual(seg(totals=quiet),
+                         "ctx-guard ⬇ today 0 · 42 checked · total 13.0k (~1.0k)")
+        self.assertEqual(seg(PRESET_MINIMAL, totals=quiet), "⬇ 0 · 42 checked")
+        self.assertEqual(seg({"template": "{today} {checked}"}, totals=quiet), "0 42")
+        # Any saving today replaces the count.
+        self.assertEqual(seg(PRESET_MINIMAL, totals={**quiet, "today": [0, 4000]}), "⬇ 1.0k")
+        # Hidden estimates don't count as a saving.
+        self.assertEqual(seg({"preset": "minimal", "estimated": "hide"},
+                             totals={**quiet, "today": [0, 4000]}), "⬇ 0 · 42 checked")
+        # No count yet (an old rollup): a plain 0, as before.
+        self.assertEqual(seg(PRESET_MINIMAL, totals={"today": [0, 0], "total": [4000, 0]}),
+                         "⬇ 0")
 
     def test_hide_when_zero(self):
         self.assertEqual(seg(totals=None), "")
